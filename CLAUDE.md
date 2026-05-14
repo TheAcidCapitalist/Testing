@@ -114,6 +114,8 @@ confidently-wrong formula on the first run.
 
 - One file per indicator. Share computation (e.g. the MA slope used by both Daily
   Trend variants, the z-score used by both Bollinger variants) — don't duplicate.
+  Shared computation lives in a `_<name>_core.py` module (leading underscore keeps
+  it out of the registry). See `_bollinger_core.py` as the established pattern.
 - Commit per phase; within Phase B, commit per indicator. Update CLAUDE.md in the
   same commit when the repo state changes (see top of file).
 
@@ -143,11 +145,16 @@ confidently-wrong formula on the first run.
 - **Phase A plumbing (scaffolded):** `pyproject.toml` (uv/hatchling), `.env.example`,
   `.gitignore`, `src/scanner/` package skeleton.
 - **Phase B (in progress):**
-  - `src/scanner/indicators/rsi.py` — **green ✓** (13 tests pass, fixture + synthetic + consistency).
-    Wilder RSI, `rsi_days=14`, `buy_cross=35`, `sell_cross=65`. Matches fixture within 1e-6.
-  - `tests/test_rsi.py` — fixture test (5 tickers), synthetic cross tests, consistency test.
-  - `tests/fixtures/synthetic/rsi_buy_cross.csv`, `rsi_sell_cross.csv`, `rsi_neutral.csv`.
-  - `src/scanner/indicators/__init__.py` — registry (auto-discovers modules, `NAME` attribute).
+  - `src/scanner/indicators/rsi.py` — **green ✓** (13 tests). Wilder RSI, matches fixture within 1e-6.
+  - `src/scanner/indicators/bollinger_normal.py` + `bollinger_contrarian.py` — **green ✓** (18 tests).
+    z = (price − MA) / σ (ddof=1, window=21). Normal: buy when z > +1.5, sell when z < −1.5.
+    Contrarian: sell when z > +1.25, buy when z < −1.25. Matches fixture within 1e-6.
+  - `src/scanner/indicators/_bollinger_core.py` — shared z-score + days_in_band (private, not auto-registered).
+    Convention: shared-core modules use a leading underscore so the registry skips them.
+  - `tests/test_rsi.py`, `tests/test_bollinger.py` — fixture + synthetic + consistency tests.
+  - `tests/fixtures/synthetic/rsi_{buy_cross,sell_cross,neutral}.csv`.
+  - `tests/fixtures/synthetic/bollinger_{above,below,inside}.csv`.
+  - `src/scanner/indicators/__init__.py` — registry (auto-discovers non-underscore modules, `NAME` attribute).
   - `src/scanner/scoring.py` — combo + ranking skeleton (not yet green).
 - **Phase C scaffolds (exist, untested):** `src/scanner/data/` (eodhd, universe, storage),
   `src/scanner/cli.py`.
@@ -189,7 +196,8 @@ data/           local DuckDB — gitignored                        [runtime only
 ### Now (verified ✓)
 
 - `~/bin/uv sync --dev` — install all deps (uv is at `~/bin/uv`; add to PATH for convenience).
-- `~/bin/uv run pytest tests/test_rsi.py` — 13 tests pass (RSI fixture + synthetic + consistency).
+- `~/bin/uv run pytest tests/test_rsi.py` — 13 tests pass.
+- `~/bin/uv run pytest tests/test_bollinger.py` — 18 tests pass (fixture + synthetic + consistency).
 - `~/bin/uv run ruff check src tests` — passes with 0 errors.
 
 ### Planned (Phase C+)
@@ -200,9 +208,9 @@ data/           local DuckDB — gitignored                        [runtime only
 
 # Current status
 
-**Phase A complete ✓. Phase B in progress — RSI done ✓.**
+**Phase A complete ✓. Phase B in progress — RSI ✓, Bollinger (Normal + Contrarian) ✓.**
 
-RSI: 13 tests green. `~/bin/uv run pytest tests/test_rsi.py` and `~/bin/uv run ruff check src tests` both pass.
+31 tests green across RSI and Bollinger. `~/bin/uv run ruff check src tests` passes.
 
 The Phase B scaffold stubs (other indicator files, scoring.py, test files) are parked
 in `_phase_b_stubs/` at the repo root. Do not re-add them until they are
@@ -213,6 +221,6 @@ rewritten to actually pass the fixture tests. Each indicator gets its own sessio
 3. Write `src/scanner/indicators/<name>.py` until the test is green.
 4. Commit + update CLAUDE.md (move indicator from "planned" to "exists now").
 
-Next indicator: **Bollinger** (`spec/indicators.md` §6/#7).
+Next indicator: **Daily Trend** (`spec/indicators.md` §4/#5).
 
 _(Update this section when a phase or indicator completes.)_
