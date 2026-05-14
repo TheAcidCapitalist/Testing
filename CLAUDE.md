@@ -142,10 +142,13 @@ confidently-wrong formula on the first run.
   (rows are newest-first — reverse before computing).
 - **Phase A plumbing (scaffolded):** `pyproject.toml` (uv/hatchling), `.env.example`,
   `.gitignore`, `src/scanner/` package skeleton.
-- **Phase B scaffolds (code exists, fixtures NOT yet green):**
-  - `src/scanner/indicators/` — 8 indicator files + `_base.py` + registry `__init__.py`.
-    These are first-pass stubs; none have been validated against `expected_indicators.csv`.
-  - `src/scanner/scoring.py` — combo + ranking skeleton.
+- **Phase B (in progress):**
+  - `src/scanner/indicators/rsi.py` — **green ✓** (13 tests pass, fixture + synthetic + consistency).
+    Wilder RSI, `rsi_days=14`, `buy_cross=35`, `sell_cross=65`. Matches fixture within 1e-6.
+  - `tests/test_rsi.py` — fixture test (5 tickers), synthetic cross tests, consistency test.
+  - `tests/fixtures/synthetic/rsi_buy_cross.csv`, `rsi_sell_cross.csv`, `rsi_neutral.csv`.
+  - `src/scanner/indicators/__init__.py` — registry (auto-discovers modules, `NAME` attribute).
+  - `src/scanner/scoring.py` — combo + ranking skeleton (not yet green).
 - **Phase C scaffolds (exist, untested):** `src/scanner/data/` (eodhd, universe, storage),
   `src/scanner/cli.py`.
 - **Phase D scaffolds (exist, untested):** `src/scanner/report/` (excel, email, dashboard
@@ -159,7 +162,7 @@ confidently-wrong formula on the first run.
   **Create this before Phase B starts.**
 - `ROADMAP.md` — referenced in CLAUDE.md but not yet written.
 - `reference/` directory + `.xlsm` — add manually.
-- `tests/fixtures/synthetic/` — needed for Box Breakout and Stochastic divergence.
+- `tests/fixtures/synthetic/` — RSI fixtures exist ✓; Box Breakout and Stochastic divergence fixtures still needed.
 - `src/scanner/agent/` — LLM briefing layer (Phase D).
 - `data/` directory — gitignored, created at runtime by DuckDB.
 
@@ -175,7 +178,7 @@ src/scanner/
   cli.py        entrypoint                                       [scaffolded, not tested]
 tests/
   fixtures/tsc_2012/    extracted ground truth                   [exists ✓]
-  fixtures/synthetic/   hand-built, for box breakout & divergence [does not exist]
+  fixtures/synthetic/   hand-built cross scenarios                 [RSI fixtures exist ✓]
 reference/      the original .xlsm                               [add manually]
 spec/           source of truth                                 [exists ✓]
 data/           local DuckDB — gitignored                        [runtime only]
@@ -186,7 +189,7 @@ data/           local DuckDB — gitignored                        [runtime only
 ### Now (verified ✓)
 
 - `~/bin/uv sync --dev` — install all deps (uv is at `~/bin/uv`; add to PATH for convenience).
-- `~/bin/uv run pytest` — runs cleanly, 0 tests collected (exit 5 is correct for empty suite).
+- `~/bin/uv run pytest tests/test_rsi.py` — 13 tests pass (RSI fixture + synthetic + consistency).
 - `~/bin/uv run ruff check src tests` — passes with 0 errors.
 
 ### Planned (Phase C+)
@@ -197,11 +200,11 @@ data/           local DuckDB — gitignored                        [runtime only
 
 # Current status
 
-**Phase A complete ✓. Phase B next — start with RSI.**
+**Phase A complete ✓. Phase B in progress — RSI done ✓.**
 
-`uv run pytest` and `uv run ruff check src tests` both pass.
+RSI: 13 tests green. `~/bin/uv run pytest tests/test_rsi.py` and `~/bin/uv run ruff check src tests` both pass.
 
-The Phase B scaffold stubs (indicator files, scoring.py, test files) are parked
+The Phase B scaffold stubs (other indicator files, scoring.py, test files) are parked
 in `_phase_b_stubs/` at the repo root. Do not re-add them until they are
 rewritten to actually pass the fixture tests. Each indicator gets its own session:
 
@@ -210,6 +213,6 @@ rewritten to actually pass the fixture tests. Each indicator gets its own sessio
 3. Write `src/scanner/indicators/<name>.py` until the test is green.
 4. Commit + update CLAUDE.md (move indicator from "planned" to "exists now").
 
-First indicator: **RSI** (`spec/indicators.md` §1).
+Next indicator: **Bollinger** (`spec/indicators.md` §6/#7).
 
 _(Update this section when a phase or indicator completes.)_
