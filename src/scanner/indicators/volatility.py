@@ -36,6 +36,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from scanner.indicators._percentile import percentile_rank
+
 NAME = "volatility"
 
 
@@ -62,23 +64,6 @@ def compute_realized_vol(closes: pd.Series, rv_window: int = 21) -> pd.Series:
     """
     log_ret = np.log(closes / closes.shift(1))
     return log_ret.rolling(rv_window).std(ddof=1) * np.sqrt(252) * 100
-
-
-def _percentile_rank(rv: pd.Series, history: int) -> pd.Series:
-    """Per-bar Excel PERCENTRANK over a rolling window.
-
-    For each bar: count values strictly below the current value in the last
-    ``history`` bars (including the current bar), then divide by (window_size − 1).
-
-    Uses min_periods=2 so short series return valid values after the second bar
-    rather than all-NaN.
-    """
-    def _apply(arr: np.ndarray) -> float:
-        cur = arr[-1]
-        below = np.sum(arr < cur)
-        return below / (len(arr) - 1)
-
-    return rv.rolling(window=history, min_periods=2).apply(_apply, raw=True)
 
 
 # ---------------------------------------------------------------------------
@@ -116,7 +101,7 @@ def compute_series(
         close = df["close"].astype(float).reset_index(drop=True)
         rv = compute_realized_vol(close, rv_window=rv_window)
 
-    pct = _percentile_rank(rv, history)
+    pct = percentile_rank(rv, history)
 
     state = np.where(
         pct < confirm_threshold, "confirm",
