@@ -139,7 +139,7 @@ confidently-wrong formula on the first run.
 ## Exists now
 
 - `spec/` — all four spec files, populated. Source of truth.
-- `CLAUDE.md`, `README.md`.
+- `CLAUDE.md`, `README.md`, `ROADMAP.md`.
 - `tests/fixtures/tsc_2012/` — 5 OHLCV CSVs + `expected_indicators.csv` + README
   (rows are newest-first — reverse before computing).
 - **Phase A plumbing (scaffolded):** `pyproject.toml` (uv/hatchling), `.env.example`,
@@ -163,13 +163,32 @@ confidently-wrong formula on the first run.
   - `src/scanner/indicators/volume.py` — **green ✓** (14 tests). Confirmation indicator.
     Emits {percentile, state}. State logic opposite Volatility: confirm (>0.7), reject (<0.3).
     Direct volume column — no two-stage computation, no helper like compute_realized_vol.
+  - `src/scanner/indicators/stochastic.py` — **green ✓** (17 tests). Trade indicator.
+    Emits {signal_value, direction, stoch_k, stoch_d}. Two conditions simultaneous:
+    K<buy_below (20) AND bullish divergence; K>sell_above (80) AND bearish divergence.
+    Pivots: K crosses D from below (low) / above (high). Divergence: last 2 same-type pivots.
+    Interpretation choices: (1) bar's own low/high for price at pivot; (2) same-type pivot pairs;
+    (3) threshold on current bar. signal_value = K/100 when signaling, 0.5 neutral.
+  - `src/scanner/indicators/_stochastic_core.py` — shared %K / %D computation (private).
+    stochastic_k: (close − min_low_k_days) / (max_high_k_days − min_low_k_days) × 100.
+    stochastic_d: rolling mean(%K, d_days). Matches pandas-ta stoch(k=14, d=5, smooth_k=1).
   - `tests/test_rsi.py`, `tests/test_bollinger.py`, `tests/test_daily_trend.py`,
-    `tests/test_volatility.py`, `tests/test_volume.py`.
+    `tests/test_volatility.py`, `tests/test_volume.py`, `tests/test_stochastic.py`.
   - `tests/fixtures/synthetic/rsi_{buy_cross,sell_cross,neutral}.csv`.
   - `tests/fixtures/synthetic/bollinger_{above,below,inside}.csv`.
   - `tests/fixtures/synthetic/dt_{div_buy,div_sell,con_buy,con_sell,flat}.csv`.
   - `tests/fixtures/synthetic/vol_{low_pct,mid_pct,high_pct,short}.csv`.
   - `tests/fixtures/synthetic/volume_{high_pct,mid_pct,low_pct,short}.csv`.
+  - `tests/fixtures/synthetic/stoch_{bullish_div,bearish_div,threshold_no_div,div_no_threshold,no_pivot}.csv`.
+  - `src/scanner/indicators/box_breakout.py` — **green ✓** (22 tests). Trade indicator.
+    Single forward-pass state machine (O(n)). Emits {signal_value, direction, box_high, box_low,
+    box_length, days_since_breakout}. signal_value: 0.25 buy, 0.75 sell, 0.50 neutral.
+    buffer_abs = breakout_buffer × midprice (pct) or × ATR (atr). Default 0.25 is conservative
+    (tunes in Phase E — no real-data breakouts at default on 2012 fixtures, which is correct).
+    Boxes found on TSC: WTI 26-bar, GOLD 55-bar, EUR 28-bar, JPY 75-bar, GBP 64-bar.
+  - `tests/test_box_breakout.py`, `tests/fixtures/synthetic/box_{flat_then_breakout_up,
+    flat_then_breakout_down,false_poke,too_short,trending_no_box,recency_expired}.csv`.
+  - `scripts/inspect_box_breakout.py` — eyeball-check script (not a pytest test).
   - `src/scanner/indicators/__init__.py` — registry (auto-discovers non-underscore modules, `NAME` attribute).
   - `src/scanner/scoring.py` — combo + ranking skeleton (not yet green).
 - **Phase C scaffolds (exist, untested):** `src/scanner/data/` (eodhd, universe, storage),
@@ -183,9 +202,10 @@ confidently-wrong formula on the first run.
 
 - `spec/source-spreadsheet.md` — the raw verbatim extraction + discrepancy table.
   **Create this before Phase B starts.**
-- `ROADMAP.md` — referenced in CLAUDE.md but not yet written.
+
 - `reference/` directory + `.xlsm` — add manually.
-- `tests/fixtures/synthetic/` — RSI fixtures exist ✓; Box Breakout and Stochastic divergence fixtures still needed.
+- `tests/fixtures/synthetic/` — RSI, Bollinger, DT, Vol, Volume, Stochastic, Box Breakout fixtures exist ✓;
+  MAV Diff Z-Score fixtures still needed.
 - `src/scanner/agent/` — LLM briefing layer (Phase D).
 - `data/` directory — gitignored, created at runtime by DuckDB.
 
@@ -217,6 +237,9 @@ data/           local DuckDB — gitignored                        [runtime only
 - `~/bin/uv run pytest tests/test_daily_trend.py` — 20 tests pass.
 - `~/bin/uv run pytest tests/test_volatility.py` — 14 tests pass.
 - `~/bin/uv run pytest tests/test_volume.py` — 14 tests pass (fixture + state-logic + short-history + consistency).
+- `~/bin/uv run pytest tests/test_stochastic.py` — 17 tests pass (%K/%D numerical + 5 synthetic divergence + output contract + consistency).
+- `~/bin/uv run pytest tests/test_box_breakout.py` — 22 tests pass (6 synthetic cases + recency window + output contract + consistency).
+- `~/bin/uv run python scripts/inspect_box_breakout.py` — eyeball-check; prints boxes found on TSC data (no assertions).
 - `~/bin/uv run ruff check src tests` — passes with 0 errors.
 
 ### Planned (Phase C+)
@@ -227,9 +250,11 @@ data/           local DuckDB — gitignored                        [runtime only
 
 # Current status
 
-**Phase A complete ✓. Phase B in progress — RSI ✓, Bollinger ✓, Daily Trend ✓, Volatility ✓, Volume ✓.**
+**Phase A complete ✓. Phase B in progress — RSI ✓, Bollinger ✓, Daily Trend ✓, Volatility ✓, Volume ✓, Stochastic ✓, Box Breakout ✓.**
 
-79 tests green across RSI, Bollinger, Daily Trend, Volatility, and Volume. `~/bin/uv run ruff check src tests` passes.
+118 tests green (9/12 modules: 7/8 trade + 2/3 confirmation). `~/bin/uv run ruff check src tests scripts` passes.
+
+Remaining Phase B indicators: MAV Breakout (§3, has fixture), MAV Diff Z-Score (§9, confirmation, synthetic only), then scoring.
 
 The Phase B scaffold stubs (other indicator files, scoring.py, test files) are parked
 in `_phase_b_stubs/` at the repo root. Do not re-add them until they are
@@ -241,5 +266,7 @@ rewritten to actually pass the fixture tests. Each indicator gets its own sessio
 4. Commit + update CLAUDE.md (move indicator from "planned" to "exists now").
 
 Next indicator: **MAV Breakout** (`spec/indicators.md` §3) — gnarly, walk through spec logic in plain English first.
+MAV Breakout uses `_stochastic_core.stochastic_k` for condition 3 (stochastic turned positive).
+MAV Breakout has fixture columns: `mav_narrow_pct`, `mav_breakout_flag`, `mav_days_since`.
 
 _(Update this section when a phase or indicator completes.)_
