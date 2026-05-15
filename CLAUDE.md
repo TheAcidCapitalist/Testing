@@ -180,6 +180,14 @@ confidently-wrong formula on the first run.
   - `tests/fixtures/synthetic/vol_{low_pct,mid_pct,high_pct,short}.csv`.
   - `tests/fixtures/synthetic/volume_{high_pct,mid_pct,low_pct,short}.csv`.
   - `tests/fixtures/synthetic/stoch_{bullish_div,bearish_div,threshold_no_div,div_no_threshold,no_pivot}.csv`.
+  - `tests/fixtures/synthetic/mav_diff_z_{pos_to_neg,neg_to_pos,holds_sign}.csv`.
+  - `tests/test_mav_diff_z.py`.
+  - `src/scanner/indicators/mav_diff_z.py` — **green ✓** (23 tests). Confirmation indicator (#9).
+    MA type: SMA (not EMA — "exponential" in description refers to the measured move, not MA type).
+    Output: {mav_diff, z_score, reversal, mav1_value, mav2_value} — NOT {percentile, state}.
+    Zero-touch: z=0 is "no sign"; reversal fires at first nonzero bar with opposite sign.
+    Sign memory persists through zero and NaN bars. v1 role: backtest exit signal only.
+    Warmup: mav2 + z_history − 2 bars (= 228 bars at defaults; 7 bars at test params 3/5/4).
   - `src/scanner/indicators/box_breakout.py` — **green ✓** (22 tests). Trade indicator.
     Single forward-pass state machine (O(n)). Emits {signal_value, direction, box_high, box_low,
     box_length, days_since_breakout}. signal_value: 0.25 buy, 0.75 sell, 0.50 neutral.
@@ -204,8 +212,7 @@ confidently-wrong formula on the first run.
   **Create this before Phase B starts.**
 
 - `reference/` directory + `.xlsm` — add manually.
-- `tests/fixtures/synthetic/` — RSI, Bollinger, DT, Vol, Volume, Stochastic, Box Breakout fixtures exist ✓;
-  MAV Diff Z-Score fixtures still needed.
+- `tests/fixtures/synthetic/` — all confirmation + trade indicator fixtures exist ✓ (RSI, Bollinger, DT, Vol, Volume, Stochastic, Box Breakout, MAV Diff Z-Score).
 - `src/scanner/agent/` — LLM briefing layer (Phase D).
 - `data/` directory — gitignored, created at runtime by DuckDB.
 
@@ -239,6 +246,7 @@ data/           local DuckDB — gitignored                        [runtime only
 - `~/bin/uv run pytest tests/test_volume.py` — 14 tests pass (fixture + state-logic + short-history + consistency).
 - `~/bin/uv run pytest tests/test_stochastic.py` — 17 tests pass (%K/%D numerical + 5 synthetic divergence + output contract + consistency).
 - `~/bin/uv run pytest tests/test_box_breakout.py` — 22 tests pass (6 synthetic cases + recency window + output contract + consistency).
+- `~/bin/uv run pytest tests/test_mav_diff_z.py` — 23 tests pass (numerical z-score + warmup + sign-change fixtures + zero-touch + consistency).
 - `~/bin/uv run python scripts/inspect_box_breakout.py` — eyeball-check; prints boxes found on TSC data (no assertions).
 - `~/bin/uv run ruff check src tests` — passes with 0 errors.
 
@@ -250,11 +258,16 @@ data/           local DuckDB — gitignored                        [runtime only
 
 # Current status
 
-**Phase A complete ✓. Phase B in progress — RSI ✓, Bollinger ✓, Daily Trend ✓, Volatility ✓, Volume ✓, Stochastic ✓, Box Breakout ✓.**
+**Phase A complete ✓. Phase B indicator engine complete ✓ (excluding MAV Breakout).**
+RSI ✓, Bollinger ✓, Daily Trend ✓, Volatility ✓, Volume ✓, Stochastic ✓, Box Breakout ✓, MAV Diff Z-Score ✓.
 
-118 tests green (9/12 modules: 7/8 trade + 2/3 confirmation). `~/bin/uv run ruff check src tests scripts` passes.
+141 tests green (10/12 modules: 7/8 trade + 3/3 confirmation). `~/bin/uv run ruff check src tests scripts` passes.
 
-Remaining Phase B indicators: MAV Breakout (§3, has fixture), MAV Diff Z-Score (§9, confirmation, synthetic only), then scoring.
+Remaining Phase B: MAV Breakout (§3, has 2012 fixture — gnarly, 4-condition simultaneous signal).
+Then: scoring.py (combo + ranking skeleton needs to be green).
+
+MAV Breakout has fixture columns: mav_narrow_pct, mav_breakout_flag, mav_days_since.
+It uses _stochastic_core.stochastic_k for condition 3 (stochastics turned positive).
 
 The Phase B scaffold stubs (other indicator files, scoring.py, test files) are parked
 in `_phase_b_stubs/` at the repo root. Do not re-add them until they are

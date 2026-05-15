@@ -331,14 +331,36 @@ consolidation in the 2012 data; it's the best informal check.
 # Confirmation indicators (3)
 
 These do **not** emit buy/sell. They confirm, demote, or flag-for-exit a signal
-produced by the trade indicators. Output `{percentile: float, state: "confirm" |
+produced by the trade indicators.
+
+**Default output shape (Volatility, Volume):** `{percentile: float, state: "confirm" |
 "neutral" | "reject"}`.
+
+**Exception — MAV Difference Z-Score (#9):** Uses a z-score and a sign-change
+flag, not a percentile rank. Output: `{mav_diff: float|None, z_score: float|None,
+reversal: bool, mav1_value: float|None, mav2_value: float|None}`. See §9 for details.
 
 ## 9. MAV Difference Z-Score
 
 Difference between two MAVs; Z-score of that difference over a long history measures
 the acceleration of trend direction. A **sign change** in the z-score is a trend
 reversal (exit) signal.
+
+**MA type:** Simple moving average (SMA). "MAV" throughout the spreadsheet always
+means SMA (same as Daily Trend and MAV Breakout). "Exponential" in the source
+description refers to the kind of move measured, not the MA type.
+
+**Output shape (exception to the {percentile, state} default):**
+`{mav_diff: float|None, z_score: float|None, reversal: bool, mav1_value: float|None,
+mav2_value: float|None}`. See the confirmation-indicators preamble above.
+
+**Zero-touch rule:** Exactly-zero z is "no sign". Reversal fires on the first bar
+with a clearly non-zero sign opposite to the most recent non-zero sign. Sign memory
+persists through zero bars (and NaN warmup bars). Example: z = +0.5 → 0.0 → −0.3:
+no reversal at z=0; reversal fires at z=−0.3.
+
+**v1 role:** Exit signal for the Phase E backtest only. Does NOT feed the live
+combo score or ranking in v1.
 
 | Param | Default |
 |-------|---------|
