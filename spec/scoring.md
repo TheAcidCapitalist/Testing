@@ -29,10 +29,65 @@ normalized values, with the exceptions below.
 > buy breakout, 0.75 if it has a sell breakout & 0.5 if it is in neutral territory."
 > Volume/OI deduction from 1 is likewise from the source.
 
+## Combinations — definition and registry
+
+A **combination** is a named, data-driven selection of indicators to include in a
+combo score run. Subset selection is first-class: a combination containing a single
+indicator ("only Box Breakout") flows through the same Stage 2 and Stage 3 logic as
+the full default — just over a smaller set. The CLI and report selection mechanism is
+a Phase D concern; this section defines the combination contract that `scoring.py`
+implements.
+
+### Definition schema
+
+A combination is a name plus a list of indicator entries. Each entry identifies an
+indicator by its `NAME` in the indicator registry, with an optional weight that
+defaults to `1.0`. The combo score is a weighted mean over the listed indicators.
+
+```
+{
+  "name":       <string>,                         # unique key, e.g. "default"
+  "indicators": [
+    { "indicator": <name>, "weight": <float> },   # weight defaults to 1.0
+    ...
+  ]
+}
+```
+
+Equal weights (all `1.0`) reproduce the arithmetic mean from the original
+spreadsheet. A weight of `0.0` is equivalent to omitting the indicator.
+
+### Seeded combinations
+
+| Name | Indicators | Purpose |
+|------|------------|---------|
+| `default` | All 8 trade indicators + Volatility + Volume | Full daily scan — matches the original spreadsheet |
+| `breakout_family` | MAV Breakout, Bollinger Normal, Box Breakout | Tickers with an active breakout-type signal |
+| `mean_reversion` | RSI, Bollinger Contrarian, Stochastic | Oversold/overbought mean-reversion candidates |
+
+Additional combinations can be added without code changes by extending the
+combination registry (a config file or DuckDB table, specified in Phase C).
+
+### How selection feeds into Stage 2 and Stage 3
+
+**Stage 2** computes `combo_score` as a weighted mean over the indicators listed in
+the selected combination.
+
+**Stage 3** counts agreement over the **trade indicators in the selected
+combination**. The denominator N in `agreement_count / N` equals the number of trade
+indicators in the combination — not always 8. For `breakout_family` (3 trade
+indicators), N = 3.
+
+Confirmation indicators (Volatility, Volume) contribute to `combo_score` when
+included in the combination. Regardless of whether they appear in the combination,
+their stored outputs always feed the `confirmation_multiplier` in Stage 3 — demotion
+for low volume or high volatility is applied whenever their data is available in
+storage.
+
 ## Stage 2 — Combo score
 
 ```
-combo_score = mean(normalized values of the indicators in the combination)
+combo_score = sum(weight_i × norm_i  for i in selected combination) / sum(weight_i)
 ```
 
 - Low combo score → buy signal. High combo score → sell signal.
@@ -40,19 +95,17 @@ combo_score = mean(normalized values of the indicators in the combination)
   - `combo_score < 0.3` → confirmed **Buy Zone**
   - `combo_score > 0.7` → confirmed **Sell Zone**
   - `0.3 – 0.7` → neutral
-- The source allows up to **three** named combinations. v1: implement a single
-  default combination over all 8 trade indicators + the 2 active confirmation
-  indicators, but keep the combination definition data-driven (a list of indicator
-  names + optional weights) so more can be added without code changes.
+- The selected combination determines which indicators participate — see
+  **Combinations** above.
 
 ## Stage 3 — Ranking
 
 The raw combo score is necessary but not sufficient for a useful daily report. The
 ranked output augments it with four factors:
 
-1. **Agreement** — how many of the 8 trade indicators agree on direction. A name
-   where 6/8 fire long is stronger than one where 3/8 do, even at the same combo
-   score. This is the headline ranking signal.
+1. **Agreement** — how many of the N trade indicators in the selected combination
+   agree on direction. A name where 6/8 fire long is stronger than one where 3/8 do,
+   even at the same combo score. This is the headline ranking signal.
 2. **Combo score magnitude** — distance from 0.5; how decisively into the buy or sell
    zone the score sits.
 3. **Confirmation strength** — the volatility and volume confirmation states.
@@ -67,7 +120,7 @@ ranked output augments it with four factors:
 Suggested ranking key (tune in Phase E):
 
 ```
-rank_score =  w_agree   * (agreement_count / 8)
+rank_score =  w_agree   * (agreement_count / N)        # N = trade indicators in combination
             + w_magnitude * abs(combo_score - 0.5) * 2
             + w_confirm  * confirmation_multiplier      # 1.0 confirmed, 0.6 demoted
             - w_staleness * min(days_since_breakout, 20) / 20
@@ -86,7 +139,7 @@ ticker, name, exchange, region, sector,
 direction,                 # buy / sell
 combo_score,
 rank_score,
-agreement_count,           # 0–8
+agreement_count,           # 0–N (N = trade indicators in selected combination)
 signals_firing,            # list of indicator names firing in `direction`
 vol_confirmation,          # confirm / neutral / reject
 volume_confirmation,       # confirm / neutral / reject  (demotes if not confirm)
@@ -97,6 +150,17 @@ as_of_date
 The report (`report/excel.py`, `report/email.py`) takes the top N long and top N
 short by `rank_score`. The LLM briefing layer (`agent/briefing.py`) reads this same
 JSON — it never re-derives anything, it only explains what's already ranked.
+
+### Per-indicator storage — hard requirement
+
+`data/storage.py` must persist the **per-indicator normalized value and raw
+indicator result for every ticker on every run date**, keyed by
+`(ticker, indicator_name, date)` — not only the final combo score.
+
+This is what makes subset combination cheap: re-scoring a `breakout_family` combo
+over stored data is a query and weighted mean over existing rows, not a re-run of
+the indicator engine on raw OHLCV. The ranked output table above is derived from
+these per-indicator rows and is always recomputeable from them.
 
 ## What the scoring layer must NOT do
 
