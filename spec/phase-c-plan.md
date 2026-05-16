@@ -541,7 +541,7 @@ scope. Apply the liquidity filters from `spec/universe.md`. Return a DataFrame w
 columns `[ticker, exchange, name, currency, market_cap_usd, sector, region]`.
 
 **Existing scaffold assessment:** Substantially incomplete. The scaffold filters
-by market cap only (using $500M, not the spec's $200M default), missing
+by market cap only (using $500M, not the spec's $750M default), missing
 `min_avg_daily_value`, `min_price`, and `min_history_bars`. The `us` and `global`
 stubs are absent. The caching strategy deletes and rewrites the whole universe
 table on every call rather than using the cached value, and has no scope concept.
@@ -556,7 +556,7 @@ def load_universe(
     budget: CallBudget,
     *,
     refresh: bool = False,
-    min_market_cap_usd: float = 200_000_000,
+    min_market_cap_usd: float = 750_000_000,
     min_avg_daily_value: float = 5_000_000,
     min_price: float = 1.0,
     min_history_bars: int = 250,
@@ -843,7 +843,7 @@ build session that depends on them.
 | 4 | **Does the EODHD free tier cover non-US exchanges for per-ticker history?** | If not, the narrow universe must be US-only | **Day 1 probe** |
 | 5 | **Does the EODHD symbol-list response include fundamentals (market cap, sector, ADV)?** | If not, fundamentals require separate calls — 1 per ticker — materially changing the budget | **Day 1 probe** |
 | 6 | **ADV computation method** for `min_avg_daily_value` filter | Fundamentals endpoint (1 extra call per ticker) vs. compute from 20-bar price history vs. relax to market-cap-only for the initial build | Before Session 3 |
-| 7 | **Exact liquidity filter defaults** (`min_market_cap_usd`, `min_avg_daily_value`, `min_price`, `min_history_bars`) | Wrong initial values admit poor-quality tickers or wrongly exclude good ones; provisional spec defaults are starting points | Before Session 3 |
+| 7 | **Exact liquidity filter defaults** (`min_market_cap_usd`, `min_avg_daily_value`, `min_price`, `min_history_bars`) | `min_market_cap_usd` **resolved: $750M** (user decision). Remaining defaults (`min_avg_daily_value`, `min_price`, `min_history_bars`) are still provisional — confirm before Session 3 | Before Session 3 |
 | 8 | **Daily run time** (back-solve from 6 AM ET delivery, confirmed EODHD publish lag) | GitHub Actions cron time | After Day 1 probe |
 | 9 | **Staging scope names** — keep `sample|us|global` or add a `narrow` scope? | CLI flag surface is carried into Phase D; changing it later is a breaking change | Before Session 4 |
 | 10 | **Combination registry format for Phase C** — Python constant vs. config file vs. DuckDB table | Affects how Phase D wires combination selection; Python constant is simplest and sufficient for Phase C | Before Session 4 |

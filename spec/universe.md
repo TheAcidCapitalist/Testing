@@ -54,7 +54,7 @@ compute on untradable microcaps. These are the only hard filters in the system
 
 | Filter | Default | Rationale |
 |--------|---------|-----------|
-| `min_market_cap` | $200M | excludes nano/micro-caps |
+| `min_market_cap` | $750M | excludes small-caps; settled by user decision, not a placeholder |
 | `min_avg_daily_value` | $5M ADV (20-day) | ensures the name is actually tradable |
 | `min_price` | $1 | drops penny stocks / data-quality noise |
 | `min_history_bars` | 250 | indicators need history; MAV Breakout's percentile window alone is 250 bars |
