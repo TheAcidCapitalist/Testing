@@ -209,8 +209,20 @@ confidently-wrong formula on the first run.
   - `scripts/inspect_box_breakout.py` — eyeball-check script (not a pytest test).
   - `src/scanner/indicators/__init__.py` — registry (auto-discovers non-underscore modules, `NAME` attribute).
   - `src/scanner/scoring.py` — combo + ranking skeleton (not yet green).
-- **Phase C scaffolds (exist, untested):** `src/scanner/data/` (eodhd, universe, storage),
-  `src/scanner/cli.py`.
+- **Phase C (in progress):**
+  - `src/scanner/data/storage.py` — **green ✓** (34 tests). DuckDB two-layer storage.
+    Layer 1: `tbl_indicator_outputs` (ticker, exchange, date, indicator_name) — source of truth.
+    Layer 2: `tbl_combo_results` (ticker, exchange, date, combination_name) — derived, recomputable.
+    Also: `tbl_prices`, `tbl_universe`, `tbl_run_log`. All writes are upserts (INSERT OR REPLACE).
+    JSON roundtrip for `raw_value` (dict) and `signals_firing` (list). Nullable `normalized_value`
+    (mav_diff_z). Run-log supports idempotent re-runs (tickers_done JSON array).
+  - `src/scanner/data/__init__.py` — package marker.
+  - `tests/test_storage.py` — 34 tests (schema, idempotency, roundtrip, nullables, run-log lifecycle).
+  - `spec/eodhd-probe-notes.md` — bulk-EOD endpoint blocked on free tier (HTTP 423).
+    Rate limit: x-ratelimit-limit: 1200 (window unknown). Per-ticker endpoint probe pending.
+  - `spec/phase-c-plan.md` — Phase C build plan with open decisions table.
+  - Remaining Phase C: `src/scanner/data/eodhd.py` (per-ticker client + rate limiter),
+    `src/scanner/data/universe.py` (scope loader: sample/us/global), `src/scanner/cli.py`.
 - **Phase D scaffolds (exist, untested):** `src/scanner/report/` (excel, email, dashboard
   json), `dashboard/artifact.html`, `.github/workflows/` (daily-scan + ci).
 - `tests/conftest.py`, `tests/test_indicators.py`, `tests/test_scoring.py`,
@@ -259,6 +271,7 @@ data/           local DuckDB — gitignored                        [runtime only
 - `~/bin/uv run pytest tests/test_mav_diff_z.py` — 23 tests pass (numerical z-score + warmup + sign-change fixtures + zero-touch + consistency).
 - `~/bin/uv run pytest tests/test_mav_breakout.py` — 18 pass, 5 xfail (narrow_pct within 0.15 + synthetic firing logic + output contract + consistency; xfail = breakout_flag/days_since fixture can't match without full Bloomberg history).
 - `~/bin/uv run python scripts/inspect_box_breakout.py` — eyeball-check; prints boxes found on TSC data (no assertions).
+- `~/bin/uv run pytest tests/test_storage.py` — 34 tests pass (DuckDB storage: schema, upserts, JSON roundtrip, run-log lifecycle).
 - `~/bin/uv run ruff check src tests` — passes with 0 errors.
 
 ### Planned (Phase C+)
@@ -269,12 +282,13 @@ data/           local DuckDB — gitignored                        [runtime only
 
 # Current status
 
-**Phase A complete ✓. Phase B indicator engine complete ✓.**
+**Phase A complete ✓. Phase B indicator engine complete ✓. Phase C in progress.**
 RSI ✓, Bollinger ✓, Daily Trend ✓, Volatility ✓, Volume ✓, Stochastic ✓, Box Breakout ✓, MAV Diff Z-Score ✓, MAV Breakout ✓.
 
-159 tests green (18 pass + 5 xfail in mav_breakout — xfail documented). `~/bin/uv run ruff check src tests scripts` passes.
+193 tests green, 5 xfailed (mav_breakout xfail documented). `~/bin/uv run ruff check src tests scripts` passes.
 
-Next: scoring.py (combo + ranking skeleton needs to be green). Then Phase C (data layer).
+Phase C progress: `storage.py` ✓ (34 tests). Remaining: `eodhd.py` (per-ticker client + rate limiter), `universe.py` (scope loader), `cli.py`.
+Next immediate task: per-ticker EODHD endpoint probe (1 call) to confirm response shape and rate-limit window, then build `eodhd.py`.
 
 The Phase B scaffold stubs (scoring.py, test files) are parked in `_phase_b_stubs/` at
 the repo root. Do not re-add until rewritten to pass.
