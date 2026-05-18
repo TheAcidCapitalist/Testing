@@ -116,14 +116,27 @@ ranked output augments it with four factors:
 4. **Breakout recency** — for MAV Breakout, Bollinger, and Box Breakout, a more
    recent breakout ranks above a stale one (the source: "priority is given to the
    most recent breakout"). Use `days_since_breakout`.
+5. **Multi-timeframe alignment** — a ticker where the same indicator (or combination)
+   fires in the same direction on multiple bar resolutions simultaneously has higher
+   conviction than a single-resolution fire. Per `spec/multi-timeframe.md`: daily +
+   weekly + monthly alignment is the highest-conviction setup. The `mtf_alignment_score`
+   encodes how many resolutions agree. This factor is only active when the multi-
+   timeframe scan modes are running; single-resolution (v1 daily-only) runs have
+   `mtf_alignment_score = 0.0` and `w_mtf` is zeroed.
+
+   **⚠ Open question #7 — Alignment scoring shape:** See `spec/multi-timeframe.md`
+   for the full set of options (additive, multiplicative, hard-tier, bonus-only-at-2).
+   **Resolution pending user decision.** Placeholder: additive option (A), `w_mtf`
+   tuned in Phase E.
 
 Suggested ranking key (tune in Phase E):
 
 ```
-rank_score =  w_agree   * (agreement_count / N)        # N = trade indicators in combination
+rank_score =  w_agree     * (agreement_count / N)        # N = trade indicators in combination
             + w_magnitude * abs(combo_score - 0.5) * 2
-            + w_confirm  * confirmation_multiplier      # 1.0 confirmed, 0.6 demoted
+            + w_confirm   * confirmation_multiplier       # 1.0 confirmed, 0.6 demoted
             - w_staleness * min(days_since_breakout, 20) / 20
+            + w_mtf       * mtf_alignment_score           # 0.0 in v1 daily-only runs
 ```
 
 Weights start equal-ish; the backtest decides the real values. Rank long candidates
@@ -155,12 +168,22 @@ JSON — it never re-derives anything, it only explains what's already ranked.
 
 `data/storage.py` must persist the **per-indicator normalized value and raw
 indicator result for every ticker on every run date**, keyed by
-`(ticker, indicator_name, date)` — not only the final combo score.
+`(ticker, exchange, indicator_name, date)` — not only the final combo score.
 
 This is what makes subset combination cheap: re-scoring a `breakout_family` combo
 over stored data is a query and weighted mean over existing rows, not a re-run of
 the indicator engine on raw OHLCV. The ranked output table above is derived from
 these per-indicator rows and is always recomputeable from them.
+
+**Resolution dimension (MTF addendum):** When multi-timeframe scan modes are active,
+the storage key gains a `resolution` field:
+`(ticker, exchange, date, indicator_name, resolution)` where
+`resolution ∈ {'daily', 'weekly', 'monthly', 'quarterly'}`.
+The v1 daily-only schema uses `resolution='daily'` as the implicit value. The column
+is added in the Phase C MTF addendum with `DEFAULT 'daily'` for backward
+compatibility with existing v1 rows. The `mtf_alignment_score` is computed by
+querying across `resolution` values for the same `(ticker, exchange, date, indicator_name)`.
+See `spec/multi-timeframe.md §Per-resolution storage` for the full schema change.
 
 ## What the scoring layer must NOT do
 

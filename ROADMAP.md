@@ -306,12 +306,100 @@ signal-scanner/
 - MAV Diff Z-Score → synthetic validation (no fixture column).
 - Pipeline → `--universe sample` (10 tickers) for dev before scaling.
 
+## Multi-timeframe range-breakout upgrade
+
+Derived from `reference/range_breakout_scanner_brief.docx`. **Not blocking v1.**
+The v1 daily-only pipeline ships first; MTF is layered in as addenda to Phases B, C,
+D, and E. Every v1 component is compatible with the MTF additions — the indicator
+stays single-timeframe, the storage gains one column, the scoring gains one term.
+
+### Core design rule
+
+The indicator stays single-timeframe — it takes whatever bar series it is given.
+The orchestrator (Phase C) handles resampling and calls the indicator over daily /
+weekly / monthly resampled inputs independently. The scoring layer (Phase D) handles
+alignment — promoting stocks where the same indicator fires on multiple resolutions
+simultaneously. Do not put resampling logic or multi-timeframe awareness inside
+any indicator.
+
+Full spec: `spec/multi-timeframe.md`.
+
+### Phase B addendum — Box Breakout enhanced spec
+
+The Box Breakout section of `spec/indicators.md` has been rewritten to incorporate
+the brief's richer single-timeframe logic. These changes are not blocking the current
+v1 implementation but define the target state for the enhanced build:
+
+- Two parallel detection signals: resistance-zone proximity (Signal A) + volatility
+  compression via ATR ratio (Signal B).
+- Minimum duration as a percentage of lookback (`min_congestion_pct=0.75`) rather than
+  absolute bar count (`min_congestion_bars=15`).
+- Enhanced breakout trigger: price condition + optional ATR expansion + optional volume
+  expansion + optional trend filter.
+- `confirmed_close` mode for weekly/monthly bars.
+- Five open questions requiring user resolution before implementation (see below).
+
+**Implementation order:** the current v1 tests remain valid. Additional synthetic
+fixtures (`pct_duration_threshold.csv`, `vol_expansion_trigger.csv`,
+`trend_filter_gated.csv`) are required for the enhanced-spec build.
+
+### Phase C addendum — resampling and per-resolution storage
+
+- **Resampling:** add a `resample_ohlcv(df, resolution)` utility in `data/` that
+  produces weekly/monthly/quarterly bar series from daily OHLCV using
+  `pandas.resample()`. See `spec/multi-timeframe.md §Resampling`.
+- **Per-resolution orchestration:** after computing indicators on daily bars, also
+  resample and compute for the `medium_term` (weekly) and `long_term` (monthly) scan
+  modes. Store per `(ticker, exchange, date, indicator_name, resolution)`.
+- **Storage schema change:** add `resolution VARCHAR DEFAULT 'daily'` to
+  `tbl_indicator_outputs`. V1 rows are unaffected.
+- **Long-history data source decision:** `long_term` (monthly, 240 bars, ~22 years)
+  likely requires Stooq or Norgate in addition to EODHD. Decision required before
+  Phase C addendum build. See `spec/multi-timeframe.md §Data source implications`.
+
+### Phase D addendum — multi-timeframe alignment scoring
+
+- Add `mtf_alignment_score` computation to `scoring.py`: for each ticker, query
+  `tbl_indicator_outputs` across resolutions and count directional agreements.
+- Add `w_mtf * mtf_alignment_score` term to the `rank_score` formula.
+- Report and dashboard changes: surface multi-resolution alignment as a column or
+  badge in the output (e.g. "D+W+M" for daily + weekly + monthly alignment).
+- Open question #7 (alignment scoring shape) must be resolved before this build.
+
+### Phase E backfill implications
+
+- Run the backtest separately for each scan mode (`short_term`, `medium_term`,
+  `long_term`) and measure forward returns at timeframe-appropriate horizons (e.g.
+  20 days for short-term, 1 year for long-term).
+- Measure whether multi-timeframe alignment signals outperform single-resolution
+  signals — this is the central hypothesis from the brief.
+- Tune `w_mtf` alongside the other ranking weights.
+- Tune Box Breakout enhanced-spec parameters: `min_congestion_pct`, `atr_expansion_factor`,
+  `vol_expansion_factor`, `trend_filter_window` per scan mode.
+
+### Open questions requiring user resolution (before Phase B/C/D addendum builds)
+
+| # | Question | Spec location |
+|---|----------|--------------|
+| 1 | Resistance zone vs. breakout level (max-high, max-high + buffer, or Signal A touch ≠ breakout) | `spec/indicators.md §8` |
+| 2 | AND vs OR for the two parallel detection signals | `spec/indicators.md §8` |
+| 3 | Per-bar definition of "true congestion" for minimum-duration counting | `spec/indicators.md §8` |
+| 4 | ATR expansion threshold (multiple, baseline window, hard gate vs demotion) | `spec/indicators.md §8` |
+| 5 | Confirmed-close vs in-progress mode default | `spec/indicators.md §8` |
+| 6 | Bar-count table inconsistency (3–10 yr weekly = 520 bars > 300-bar guideline) | `spec/multi-timeframe.md` |
+| 7 | MTF alignment scoring shape (additive, multiplicative, hard-tier, bonus-at-2) | `spec/multi-timeframe.md` |
+| 8 | Volume in breakout trigger (Option A: keep separate; B: integrate; C: soft gate) | `spec/indicators.md §8` |
+
+---
+
 ## Open items
 
 - Box Breakout default parameters — set in Phase E, not by eye.
+- Box Breakout enhanced-spec open questions #1–8 — see table above; resolve before Phase B addendum.
 - v2 OI substitute — put/call ratio vs. short interest, decide later.
 - Exact daily run time — back-solve from "6 AM ET delivery" once exchange close
   timings are mapped in Phase C.
+- Long-history data source for `long_term` scan mode — Stooq vs Norgate; resolve before Phase C addendum.
 
 ---
 
