@@ -12,16 +12,20 @@ and the existing scaffolds in `src/scanner/data/` and `src/scanner/cli.py`.
 - `data/storage.py` — complete two-layer DuckDB persistence: per-indicator rows
   `(ticker, exchange, date, indicator_name)` as the source of truth, plus derived
   combo/ranking rows by combination name. Replaces the current incomplete scaffold.
-- `data/eodhd.py` — live EODHD client extended with the bulk-EOD daily-refresh
-  endpoint and a rate limiter that enforces both daily and per-minute ceilings.
+- `data/eodhd.py` — live EODHD client using per-ticker EOD calls for both
+  historical backfill and daily refresh (confirmed available on free tier — Probe 2).
+  Enforces the 20-call/day hard cap via a daily counter persisted in `tbl_run_log`.
+  Designed so upgrading to a paid tier is a configuration change (raise `daily_limit`,
+  enable the bulk-EOD endpoint) rather than a rewrite. No per-request sleep is needed;
+  the actual throughput limit (1,200/minute) is not a binding constraint at 20 calls/day.
 - `data/universe.py` — universe loader with the `sample` scope fully operational
   for the test phase; `us` and `global` scopes guarded behind a paid-tier check.
 - `cli.py` — `scanner run-daily --universe sample|us|global` with a full
   orchestration pipeline: load universe → fetch OHLCV → store raw prices → run all
   registered indicators → store per-indicator outputs → store combo + ranking.
 - End-to-end gate: `uv run scanner run-daily --universe sample` completes on the
-  narrow universe, writes both DuckDB layers, respects both rate limits, and is
-  idempotent on re-run.
+  narrow universe, writes both DuckDB layers, respects the 20-call/day daily cap, and
+  is idempotent on re-run.
 
 ### 1.2 What this phase does not deliver
 
@@ -37,16 +41,25 @@ and the existing scaffolds in `src/scanner/data/` and `src/scanner/cli.py`.
 
 ## 2. Hard operational constraints (test phase)
 
-Both limits apply simultaneously to every API call from every component:
+Two rate-limit mechanisms exist but only one is the binding constraint:
 
-| Limit | Value | Consequence of violation |
-|-------|-------|--------------------------|
-| Daily API calls | **20 / calendar day** | Run aborts; remaining tickers deferred to next day |
-| Per-minute call rate | **2 / minute** | 30-second minimum gap between consecutive calls |
+| Limit | Value | Window | Mechanism | Consequence of violation |
+|-------|-------|--------|-----------|--------------------------|
+| Daily call quota | **20 / calendar day** | Per calendar day | Billing layer; not in API headers | Run aborts; remaining tickers deferred to next day |
+| Throughput cap | 1,200 / minute | Rolling 60-second window | `x-ratelimit-limit` header | Practically unreachable at 20 calls/day |
 
-These are not soft targets. Every component that makes API calls must thread a shared
-`CallBudget` object and a per-minute throttle. Neither limit can be bypassed by
-parallelism — all API calls are serialised through the single client.
+**The 20/day quota is the only binding constraint.** The 1,200/minute throughput cap
+(confirmed in Probe 2) is not a practical limit at 20 calls/day — we would need to
+fire all 20 calls within a single second to approach it. No per-request sleep is
+needed; the client need not enforce any timing delay between calls.
+
+The daily counter is the single enforcement mechanism. Every component that makes
+API calls threads a shared `CallBudget` object. All API calls are serialised through
+the single client. The counter cannot be bypassed by parallelism.
+
+**Note on `x-ratelimit-remaining`:** This header reflects the per-minute throughput
+bucket, not the daily quota. It cannot be used to track daily remaining calls. The
+daily counter is maintained in `tbl_run_log.api_calls_used` (see §6.1).
 
 ---
 
@@ -71,14 +84,14 @@ to a curated list.
 **Curated list of ~15 liquid global names.** The only shape that fits the ceiling
 cleanly.
 
-- Historical backfill: 15 per-ticker calls + 1–2 probe/metadata calls = 16–17 calls.
-  Done in one session.
-- Daily refresh: 1 bulk-EOD call covers the entire exchange; filter to the 15 in
-  Python. Daily cost ≤ 4 calls including overhead and error headroom.
-- At 2 calls/min: 17 calls takes approximately 8.5 minutes. Well within any
-  reasonable run window.
-- Expanding by 5 tickers later costs 5 backfill calls, well inside the 16 spare
-  daily calls after steady-state.
+- Historical backfill (one-time, Day 1): 15 per-ticker calls, one per ticker.
+  Completes in well under a minute (no pacing needed; 1,200/min throughput cap is not
+  a constraint).
+- Daily refresh (steady-state): 1 per-ticker call per ticker = 15 calls/day. Budget
+  headroom: 20 − 15 = 5 calls/day for overhead, retries, and metadata.
+- Expanding by 5 tickers later costs 5 backfill calls; steady-state rises to 20
+  calls/day exactly. Any further expansion requires a paid-tier upgrade or the
+  universe must shrink to stay within budget.
 
 **Composition:** 15 names drawn from at least 4 regions and 5 sectors so the
 regional/sector taxonomy is exercised from the start. All must be highly liquid
@@ -92,15 +105,23 @@ hardcoded.
 
 | Activity | Calls | Timing |
 |----------|-------|--------|
-| First-run probe (one-time) | 2 | Day 1 only |
-| Historical backfill, 15 tickers (one-time) | 15 | Day 1 only; 7.5 min at 2/min |
-| Daily: bulk-EOD for universe exchange(s) | 1–2 | Every run day |
-| Daily: metadata / retry / symbol-list refresh | 2 | Every run day |
-| **Daily steady-state total** | **≤ 4** | Well within 20/day |
-| **Day-1 total** | **≤ 19** | Within 20/day with 1 spare |
+| API probes (one-time; already done) | 3 | Done in Probe sessions 1 and 2 |
+| Historical backfill, 15 tickers (one-time) | 15 | Day 1; completes in < 1 minute |
+| Daily: per-ticker EOD refresh, 15 tickers | 15 | Every run day |
+| Daily: overhead (symbol-list, retries, metadata) | ≤ 5 | Every run day |
+| **Daily steady-state total** | **≤ 20** | Tight fit; no headroom for expansion beyond 15 tickers |
+| **Day-1 total** | **15** | Backfill = refresh on Day 1; probes already consumed |
 
-After day 1 the daily budget is almost entirely unspent. The 16 spare daily calls
-can absorb retries, additional metadata, or incremental universe expansion.
+**Steady-state budget is tight.** At 15 tickers the daily refresh consumes 15 of the
+20 available calls. The 5-call overhead cushion is adequate for retries and occasional
+metadata lookups but leaves no room for universe expansion without a paid-tier
+upgrade. Any scope larger than ~15 tickers requires Option A (paid EODHD) where the
+daily quota is orders of magnitude higher.
+
+**On paid tier:** The bulk-EOD endpoint (blocked on free tier, available on paid)
+replaces 15 per-ticker calls with 1 call per exchange. Daily steady-state drops from
+15 calls to 1–2, and the universe can expand to thousands of tickers. The client is
+designed for this transition to be a configuration change only.
 
 ### 3.3 Staging structure
 
@@ -120,23 +141,39 @@ The `sample` scope label is retained for CLI compatibility. Its spirit shifts fr
 "fixture-adjacent sanity check" (universe.md) to "the complete free-tier test
 universe." These are compatible: the same narrow list serves both purposes.
 
-### 3.4 EODHD probe — mandatory first step, Day 1
+### 3.4 EODHD probe sessions — complete
 
-Before writing any parser, make 2 API calls (consuming 2 of the day's 20) to
-observe actual response shapes:
+Both probe sessions have been completed. Full findings are in
+`spec/eodhd-probe-notes.md`. Key results relevant to the client build:
 
-1. `GET /eod-bulk-last-day/{exchange}` — bulk EOD shape: field names, types,
-   ticker key format, whether adjusted prices are included.
-2. `GET /eod/{TICKER}.{EXCHANGE}?period=d&from=...` — per-ticker historical shape.
+**Probe 1 (2026-05-16) — bulk-EOD endpoint:**
+- `GET /eod-bulk-last-day/{exchange}` → HTTP 423 (Locked). Bulk endpoint is
+  blocked on the free tier. This closes open decision #3.
 
-Document the real shapes in a comment block at the top of `data/eodhd.py`. Do not
-infer from documentation or prior versions — EODHD response shapes have changed
-across API versions. Build the parsers around what is actually observed.
+**Probe 2 (2026-05-18) — per-ticker EOD, symbol list, rate-limit window:**
 
-The probe also answers open decisions #3, #4, and #5 (§7):
-- Is the bulk-EOD endpoint available on the free tier?
-- Does the free tier cover non-US exchange history?
-- Does the symbol-list response include fundamentals (market cap, sector, ADV)?
+1. `GET /api/eod/AAPL.US?period=d&from=...` → HTTP 200. Per-ticker endpoint is
+   available. Response shape (7 fields per bar, JSON array, ascending date):
+   ```json
+   {"date": "2026-05-18", "open": 300.24, "high": 300.66, "low": 294.91,
+    "close": 297.84, "adjusted_close": 297.84, "volume": 34313641}
+   ```
+   **Critical:** the adjusted close field is `adjusted_close`, not `adj_close`.
+   The client must rename it to `adj_close` on ingest.
+
+2. `GET /api/exchange-symbol-list/US?type=common_stock` → HTTP 200. Returns 18,462
+   rows. Fields per row: `Code`, `Name`, `Country`, `Exchange`, `Currency`, `Type`,
+   `Isin`. **No `MarketCapitalization`, `Sector`, or average volume.** This closes
+   open decision #5. See open decision #14 for the resulting metadata strategy choice.
+
+3. Rate-limit window: the `x-ratelimit-limit: 1200` header is a per-minute (60-second
+   rolling) throughput cap, not the daily quota. The 20/day limit is a separate
+   billing-layer cap not reflected in any header. See §2 for the updated constraint
+   model. This closes open decision #7 (rate-limit mechanism).
+
+**Non-US exchange coverage:** Not probed. Open decision #4 remains open. The narrow
+15-ticker test-phase universe should initially use US-only tickers to avoid this
+uncertainty. Non-US coverage can be probed in a future session when needed.
 
 ---
 
@@ -460,40 +497,57 @@ separately, not embedded in the OHLCV frame.
 
 **Test phase and Options A and C — single EODHD client:**
 
-The existing `EODHDClient` is the foundation. Two additions are required:
-
-**1. Bulk-EOD endpoint** (currently missing):
+**Per-ticker EOD endpoint** (confirmed available on free tier — Probe 2):
 
 ```
-GET /eod-bulk-last-day/{exchange}?api_token=...
+GET /api/eod/{TICKER}.{EXCHANGE}?api_token=...&period=d&from=YYYY-MM-DD&fmt=json
 ```
 
-Returns all tickers' last-trading-day OHLCV for an exchange in one call. The parser
-converts the response to `dict[str, pd.Series]` keyed by ticker symbol. The exact
-field names must be confirmed in the probe session — do not guess.
+Returns a JSON array of OHLCV bars for one ticker from `from` to today. Used for
+both historical backfill (long `from` date on first run) and daily refresh (yesterday
+as `from` date in steady state). The parser maps the response to the canonical
+DataFrame shape, renaming `adjusted_close` → `adj_close` (see field-name convention
+below).
 
-**2. Rate limiter and daily budget:**
+**Bulk-EOD endpoint** (blocked on free tier; available on paid tier):
+
+```
+GET /api/eod-bulk-last-day/{exchange}?api_token=...&fmt=json
+```
+
+Blocked (HTTP 423) on the free tier (Probe 1). On paid tier, returns all tickers'
+last-trading-day OHLCV for an exchange in one call. The client must be structured so
+enabling this is a configuration flag (`use_bulk_eod: bool = False`) rather than a
+separate code path. When `use_bulk_eod=True`, the orchestrator calls this once per
+exchange before the per-ticker loop and reads today's bar from the in-memory result
+rather than making per-ticker calls for the daily bar.
+
+**Field-name convention — `adjusted_close` → `adj_close`:**
+
+The EODHD API returns `adjusted_close`. The canonical DataFrame and DuckDB column use
+`adj_close`. The client renames this field on ingest. Nothing downstream changes.
+
+**Daily budget — `CallBudget`:**
 
 ```python
 class CallBudget:
-    """Shared daily call counter. Persisted across process restarts."""
-    def __init__(self, daily_limit: int = 20, persist_path: Path | None = None) -> None: ...
+    """Shared daily call counter. Source of truth: tbl_run_log.api_calls_used."""
+    def __init__(self, daily_limit: int = 20) -> None: ...
     def charge(self, n: int = 1) -> None: ...   # raises DailyBudgetExceeded if over
     def remaining(self) -> int: ...
-    def save(self) -> None: ...                  # write JSON to persist_path
-    @classmethod
-    def load(cls, persist_path: Path) -> CallBudget: ...   # reload from disk
 ```
 
-The per-minute throttle lives in the client, not the budget: before each HTTP call,
-sleep `max(0, 30.0 - elapsed_seconds_since_last_call)`. The 30-second floor
-guarantees ≤ 2 calls/minute. The throttle is not configurable — it is a hard
-constraint, not a tunable parameter.
+`daily_limit` is a parameter (default 20 for the free tier). Upgrading to a paid tier
+means raising this value and setting `use_bulk_eod=True` — no other changes.
 
-`CallBudget` is persisted to `data/budget_YYYY-MM-DD.json` after every charge. On
-re-run within the same calendar day, the orchestrator loads the existing budget
-rather than creating a fresh one — preventing a re-run from resetting the counter
-and silently making extra calls.
+**No per-request sleep is needed.** The throughput cap (1,200/minute, confirmed in
+Probe 2) is not a binding constraint at 20 calls/day. Removing the 30-second sleep
+also makes the test suite faster: mocked call sequences no longer need sleeps.
+
+**Budget persistence:** `tbl_run_log.api_calls_used` is the canonical counter, updated
+by `Storage.log_run_ticker_done()` and `Storage.log_run_end()`. On a same-day re-run,
+the orchestrator reads `api_calls_used` from the existing run-log row and initialises
+`CallBudget` from that value — the counter does not reset.
 
 **Option B — multi-source additions:**
 
@@ -521,16 +575,12 @@ Each source implements the protocol. A `RoutingClient` wraps multiple implementa
 
 **Open questions:**
 
-- Does the EODHD free tier support the bulk-EOD endpoint? The probe session
-  resolves this. If not, daily refresh costs 15 calls instead of 1, consuming
-  the entire budget for the narrow universe — a significant constraint change.
-- Does the free tier cover non-US exchange history (LSE, TSE, ASX)? If not, the
-  narrow universe is US-only.
-- Does the EODHD symbol-list response include market cap, sector, and ADV fields?
-  If these require separate fundamental calls (one per ticker), the budget
-  arithmetic changes materially.
+- Does the EODHD free tier cover non-US exchange history (LSE, TSE, ASX)? Not yet
+  probed. Until confirmed, the narrow test-phase universe uses US-only tickers.
+  (Open decision #4.)
 - For Option B: which specific sources form the stack, and what is the conflict
   resolution rule? Both must be decided before any Option B code is written.
+  (Open decision #12.)
 
 ---
 
@@ -589,11 +639,12 @@ the entire transition. No new code paths.
 
 **Open questions:**
 
-- Exact ADV computation method: fundamentals endpoint (1 extra call per ticker) vs.
-  compute from 20-bar price fetch vs. relax ADV filter to market-cap-only for the
-  initial build. (Open decision #6.)
-- Does the EODHD symbol-list endpoint return sector and region fields? If not, these
-  must be sourced separately or left null until a fundamentals call is added.
+- Exact ADV computation method: fundamentals endpoint (1 extra call/ticker, not
+  feasible on free tier) vs. compute from stored price data (close × volume rolling
+  mean over 20 bars — viable once prices are in storage) vs. relax ADV filter to
+  market-cap-only for the initial build. (Open decision #6.)
+- Sector and region metadata: the EODHD symbol-list endpoint does not return these
+  fields (Probe 2). Source is open decision #14 (metadata strategy).
 - The exact 15 tickers for `sample`. (Open decision #2.)
 
 ---
@@ -624,59 +675,57 @@ flag surface are Phase D's concern.
    load_universe(scope=args.universe, ...).
    Result: DataFrame of (ticker, exchange) pairs.
 
-3. Fetch today's OHLCV — one bulk call before the per-ticker loop
-   client.fetch_bulk_today(exchange) for each exchange in the universe.
-   budget.charge(1) per exchange.
-   Store result as {ticker: today_series} in memory for step 4c.
-
-4. Per-ticker loop
+3. Per-ticker loop
    For each (ticker, exchange) in universe:
      a. Skip if ticker in storage.get_completed_tickers(run_id). (idempotent)
-     b. Fetch OHLCV history if not up-to-date in storage.
-        client.fetch_history(ticker, exchange, from_date, to_date).
-        budget.charge(1). Raises DailyBudgetExceeded → go to step 5.
+     b. Determine fetch range and fetch OHLCV.
+        last_stored = storage.most_recent_price_date(ticker, exchange)
+        if last_stored >= today: skip (already current, 0 calls).
+        else: client.fetch_history(ticker, exchange,
+                                   from_date = last_stored + 1 day (or default),
+                                   to_date   = today)
+        budget.charge(1). Raises DailyBudgetExceeded → go to step 4.
         storage.write_prices(ticker, exchange, df).
-     c. Append today's bar from the bulk result fetched in step 3.
-        storage.write_prices(..., today_row).
-     d. Validate OHLCV (§6.7 sanity checks).
-     e. Warmup check: if row count < min_history_bars, log skip, continue.
-     f. Build compute df: read from storage, set adj_close as 'close'.
-     g. Run all registered indicators:
+        Note: this single call handles both historical backfill (day 1, long from_date)
+        and daily refresh (steady state, from_date = yesterday).
+     c. Validate OHLCV (§6.7 sanity checks).
+     d. Warmup check: if row count < min_history_bars, log skip, continue.
+     e. Build compute df: read from storage, set adj_close as 'close'.
+     f. Run all registered indicators:
           for name, mod in REGISTRY.items():
               result = mod.compute(df)
-     h. Normalise each result to 0–1 (Stage 1 of spec/scoring.md).
-     i. storage.write_indicator_outputs(rows).
-     j. Compute combo score and ranking for each combination in the registry.
+     g. Normalise each result to 0–1 (Stage 1 of spec/scoring.md).
+     h. storage.write_indicator_outputs(rows).
+     i. Compute combo score and ranking for each combination in the registry.
         (scoring.py is called here, inline per ticker.)
-     k. storage.write_combo_results(df).
-     l. storage.log_run_ticker_done(run_id, ticker, exchange).
+     j. storage.write_combo_results(df).
+     k. storage.log_run_ticker_done(run_id, ticker, exchange).
 
-5. Finalise
+4. Finalise
    storage.log_run_end(run_id, status='completed'|'partial', api_calls).
-   budget.save().
    Print summary: N tickers processed, N signals, N API calls used, remaining budget.
 ```
 
 **Budget enforcement:** `DailyBudgetExceeded` is caught at the top of the ticker
-loop (step 4b). On catch: log remaining tickers, call `log_run_end(status='partial')`,
-`budget.save()`, and exit with code 0. A partial run is not a failure — it is the
-expected outcome when the narrow universe is being expanded or backfilled. GitHub
-Actions should not mark a partial run as a workflow failure.
+loop (step 3b). On catch: log remaining tickers, call `log_run_end(status='partial')`,
+and exit with code 0. A partial run is not a failure — it is the expected outcome when
+the daily budget is exhausted before all tickers are processed. GitHub Actions should
+not mark a partial run as a workflow failure.
 
-**Bulk-EOD optimisation:** Step 3 fetches today's data for the entire exchange in
-one call, stored as a dict. Step 4c reads from this dict without making additional
-calls. For the 15-ticker narrow universe, one exchange call covers all tickers. The
-per-ticker loop then costs zero calls for the daily bar — only the history call (4b)
-is charged, and only for tickers whose stored data is not current.
+**Paid-tier upgrade path:** When `use_bulk_eod=True`, step 3 gains a pre-loop
+exchange call that fetches today's bar for all tickers in one API call. Steps 3b then
+read the daily bar from the in-memory dict without consuming additional budget. The
+orchestrator is written with this flag from the start; enabling it on a paid tier
+requires only the configuration change — no code path addition.
 
 **Combination registry:** For Phase C, a Python-level constant list of the three
 seeded combinations from `spec/scoring.md` (`default`, `breakout_family`,
-`mean_reversion`). The orchestrator iterates this list for step 4j. Phase D may
+`mean_reversion`). The orchestrator iterates this list for step 3i. Phase D may
 make this configurable.
 
 **`scoring.py` integration:** The orchestrator calls `scoring.py` inline per ticker
-in step 4j. `scoring.py` receives the per-indicator outputs for one ticker (from the
-dict built in steps 4g–4h) and a combination definition, and returns the combo score
+in step 3i. `scoring.py` receives the per-indicator outputs for one ticker (from the
+dict built in steps 3f–3g) and a combination definition, and returns the combo score
 and ranking fields. It does not read from or write to storage — that is the
 orchestrator's job.
 
@@ -686,9 +735,9 @@ orchestrator's job.
   `scoring.py` or inline in the orchestrator? Recommended: inside `scoring.py` as
   `normalize(indicator_name, raw_result) -> float`. This keeps the scoring logic in
   one place and makes the orchestrator a thin pipeline.
-- Total run time for `--universe sample` at 2/min pacing: estimated 10–12 minutes
-  for 15 tickers (including storage writes and indicator computation). Acceptable
-  for the test phase. Should be measured in session 5 and logged.
+- Total run time for `--universe sample`: with no per-request sleep, the bottleneck
+  is indicator computation and DuckDB writes, not API pacing. Estimated 1–2 minutes
+  for 15 tickers. Should be measured in session 5 and logged.
 
 ---
 
@@ -698,29 +747,33 @@ orchestrator's job.
 
 `CallBudget` is the single authority on daily consumption. Rules:
 
-1. Instantiated once per run by the orchestrator before any API call.
-2. Persisted to `data/budget_YYYY-MM-DD.json` after every `charge()`. On same-day
-   re-run, loaded from disk. A re-run that sees an existing budget file for today
-   continues from the actual remaining balance — it cannot silently overspend.
+1. Instantiated once per run by the orchestrator before any API call. Initial value
+   read from `tbl_run_log.api_calls_used` for today's run_id (0 if no row yet).
+2. On same-day re-run, the existing run log row is loaded and `CallBudget` is
+   initialised from `api_calls_used` — the counter does not reset. There is no
+   separate JSON budget file; `tbl_run_log` is the canonical store.
 3. Every API call in every component goes through `budget.charge()`. The budget
    object is passed as a dependency (not global state) so tests can inject a mock.
 4. `DailyBudgetExceeded` causes a clean partial exit. It is not a crash.
-5. The per-minute throttle (30-second sleep) is handled inside `EODHDClient`, not
-   in the budget. Budget counts calls; client enforces timing.
+5. No per-request sleep is needed. The 1,200/minute throughput cap (confirmed in
+   Probe 2) is not a practical constraint at 20 calls/day. The client makes calls
+   as fast as the network and storage allow.
 
 ### 6.2 Historical backfill
 
 **Test phase (15-ticker narrow universe):**
 
-Day 1 fetches the full history for each of the 15 tickers: 15 calls, 7.5 minutes
-at 2/min. This is a one-time cost. Subsequent days add only the current bar via the
-bulk call. There is no ongoing backfill problem at the narrow scope.
+Day 1 fetches the full history for each of the 15 tickers: 15 calls, well under
+1 minute (no pacing needed). Subsequent days add only bars since the last stored date
+via the same per-ticker endpoint with a short `from` range. There is no ongoing
+backfill problem at the narrow scope.
 
 **Extending the narrow universe incrementally:**
 
-Each additional ticker costs 1 backfill call. The 16 spare calls/day after
-steady-state absorb up to 16 new tickers per day. Expansion is bounded by the daily
-budget, not by architectural constraints.
+Each additional ticker costs 1 backfill call. The 5-call overhead budget
+(20 − 15 steady-state = 5) absorbs up to 5 new tickers per day, at which point
+steady-state reaches 20 calls/day exactly. Any further expansion requires either
+reducing the existing universe or upgrading to a paid tier.
 
 **Production backfill (Options A and B — decided before Phase D):**
 
@@ -751,10 +804,11 @@ must be confirmed during the probe session. A test call at 04:00 UTC on a
 post-trading day verifies that the prior-day bars are present. If the lag is longer
 than expected, the cron time shifts right.
 
-**Stale data detection:** After the bulk-EOD call, compare the most recent date in
-the response to the expected prior trading day. If the dates do not match, the
-exchange is skipped for this run and flagged in the run log. Never compute indicators
-on a bar that may not be the most recent close.
+**Stale data detection:** After fetching a ticker's bars, compare the most recent
+date in the response to the expected prior trading day. If the most recent date is
+more than one trading day stale (accounting for weekends and holidays), skip
+indicator computation for that ticker and flag it in the run log. Never compute
+indicators on a bar that may not be the most recent close.
 
 **Holiday handling:** EODHD does not return data for exchange holidays. A missing
 date in the price series is normal. Rolling-window indicators handle sparse series
@@ -793,7 +847,7 @@ orchestrator:
 |---------|-----------|----------|
 | API 4xx / 5xx | `httpx` raises `HTTPStatusError` | Log ticker + status, mark skipped, continue loop |
 | Daily budget exceeded | `DailyBudgetExceeded` raised | Break loop, mark run `partial`, exit 0 |
-| Per-minute throttle | Prevented by client sleep; not raised as an error | N/A |
+| Per-minute throughput cap hit | Practically unreachable at 20 calls/day (1,200/min cap confirmed in Probe 2) | Not a concern; no client sleep needed |
 | DuckDB write failure | Exception on `execute()` | Log + re-raise; full run failure; GHA marks failure |
 | Indicator `compute()` raises | Exception caught per indicator | Log (ticker, indicator, traceback), skip that indicator for that ticker, continue |
 | OHLCV validation fails | Sanity check in orchestrator | Log, skip ticker, continue |
@@ -835,21 +889,110 @@ window indicators handle sparse series. Log the gap counts per ticker per run.
 These must be resolved before or during Phase C. Items marked **Day 1** block the
 build session that depends on them.
 
-| # | Decision | Stakes | When needed |
-|---|----------|--------|-------------|
-| 1 | **Production data sourcing path** (A / B / C / Twelve Data / Tiingo) | Whether `us`/`global` are ever built; client layer architecture | Before Phase D |
-| 2 | **Exact 15 tickers in the `sample` universe** | What the test phase actually runs on; regional and sector coverage of early outputs | **Before Session 3** |
-| 3 | **Does the EODHD free tier support the bulk-EOD endpoint?** | If not, daily refresh costs 15 calls instead of 1; still within 20/day but uses most of the budget | **Day 1 probe** |
-| 4 | **Does the EODHD free tier cover non-US exchanges for per-ticker history?** | If not, the narrow universe must be US-only | **Day 1 probe** |
-| 5 | **Does the EODHD symbol-list response include fundamentals (market cap, sector, ADV)?** | If not, fundamentals require separate calls — 1 per ticker — materially changing the budget | **Day 1 probe** |
-| 6 | **ADV computation method** for `min_avg_daily_value` filter | Fundamentals endpoint (1 extra call per ticker) vs. compute from 20-bar price history vs. relax to market-cap-only for the initial build | Before Session 3 |
-| 7 | **Exact liquidity filter defaults** (`min_market_cap_usd`, `min_avg_daily_value`, `min_price`, `min_history_bars`) | `min_market_cap_usd` **resolved: $750M** (user decision). Remaining defaults (`min_avg_daily_value`, `min_price`, `min_history_bars`) are still provisional — confirm before Session 3 | Before Session 3 |
-| 8 | **Daily run time** (back-solve from 6 AM ET delivery, confirmed EODHD publish lag) | GitHub Actions cron time | After Day 1 probe |
-| 9 | **Staging scope names** — keep `sample|us|global` or add a `narrow` scope? | CLI flag surface is carried into Phase D; changing it later is a breaking change | Before Session 4 |
-| 10 | **Combination registry format for Phase C** — Python constant vs. config file vs. DuckDB table | Affects how Phase D wires combination selection; Python constant is simplest and sufficient for Phase C | Before Session 4 |
-| 11 | **`raw_value` storage strategy** — full `compute()` dict in JSON, or extracted scalar fields? | Full JSON: flexible, larger, opaque to SQL; extracted: queryable, requires schema migration per indicator change | Before Session 1 |
-| 12 | **(Option B only) Specific sources and conflict resolution rule** | Core to the multi-source architecture; cannot build without this | Before any Option B code |
-| 13 | **(Option A/B only) Production backfill strategy** — how to acquire 2+ years of global history before Phase D launch | Phase E backtest needs sufficient history; cannot start E without it | Before Phase D |
+| # | Decision | Stakes | Status |
+|---|----------|--------|--------|
+| 1 | **Production data sourcing path** (A / B / C / Twelve Data / Tiingo) | Whether `us`/`global` are ever built; client layer architecture | Open — before Phase D |
+| 2 | **Exact 15 tickers in the `sample` universe** | What the test phase actually runs on; regional and sector coverage of early outputs | Open — before Session 3 |
+| 3 | **Does the EODHD free tier support the bulk-EOD endpoint?** | Daily refresh costs; architecture of the daily loop | **Resolved: NO.** HTTP 423. Per-ticker EOD required. Daily refresh = 15 calls for 15 tickers. (Probe 1) |
+| 4 | **Does the EODHD free tier cover non-US exchanges for per-ticker history?** | Whether the narrow universe can include non-US tickers | **Partially open.** US confirmed (Probe 2). Non-US not yet probed. Test-phase universe is US-only until confirmed. |
+| 5 | **Does the EODHD symbol-list response include fundamentals (market cap, sector, ADV)?** | Whether fundamentals require separate calls or an external source | **Resolved: NO.** 7 fields only: Code, Name, Country, Exchange, Currency, Type, Isin. See decision #14 for the resulting metadata strategy. (Probe 2) |
+| 6 | **ADV computation method** for `min_avg_daily_value` filter | Fundamentals endpoint (1 extra call/ticker) vs. compute from stored price data vs. relax filter initially | Open — before Session 3 |
+| 7 | **Exact liquidity filter defaults** (`min_market_cap_usd`, `min_avg_daily_value`, `min_price`, `min_history_bars`) | Universe size and composition | **Fully resolved.** All four confirmed by user decision: `min_market_cap_usd=$750M`, `min_avg_daily_value=$5M`, `min_price=$1.00`, `min_history_bars=250`. |
+| 8 | **Daily run time** (back-solve from 6 AM ET delivery, confirmed EODHD publish lag) | GitHub Actions cron time | Open — after first live end-to-end run |
+| 9 | **Staging scope names** — keep `sample|us|global` or add a `narrow` scope? | CLI flag surface is carried into Phase D; changing it later is a breaking change | Open — before Session 4 |
+| 10 | **Combination registry format for Phase C** — Python constant vs. config file vs. DuckDB table | Affects how Phase D wires combination selection; Python constant is simplest and sufficient for Phase C | Open — before Session 4 |
+| 11 | **`raw_value` storage strategy** — full `compute()` dict in JSON, or extracted scalar fields? | Full JSON: flexible, larger, opaque to SQL; extracted: queryable, requires schema migration per indicator change | **Resolved: full JSON dict.** Implemented in `storage.py` (34 tests green). |
+| 12 | **(Option B only) Specific sources and conflict resolution rule** | Core to the multi-source architecture; cannot build without this | Open — before any Option B code |
+| 13 | **(Option A/B only) Production backfill strategy** — how to acquire 2+ years of global history before Phase D launch | Phase E backtest needs sufficient history; cannot start E without it | Open — before Phase D |
+| 14 | **Metadata source strategy** — how to obtain market cap, sector, and region per ticker | Universe loader cannot apply `min_market_cap` or sector-grouping filters without this. See §7.1 for options. | Open — before Session 3 |
+
+### 7.1 Metadata source strategy (decision #14)
+
+The EODHD symbol-list endpoint does not return market cap, sector, region, or average
+daily value (confirmed in Probe 2 — see `spec/eodhd-probe-notes.md`). The universe
+loader needs these fields to apply the `min_market_cap` and sector-grouping taxonomy.
+Five options exist:
+
+**Option A — Manual constants in `universe.py` (test-phase default)**
+
+The `sample` scope hardcodes ~15 tickers. Market cap and sector for these tickers are
+known in advance and can be embedded as constants directly in `universe.py`. No API
+calls are needed; no external source is required.
+
+- Calls consumed: 0.
+- Filtering: `min_market_cap` is guaranteed by manual selection; sector and region are
+  embedded constants.
+- Limitation: does not scale beyond the manually maintained list.
+- **Verdict for test phase: use this.** For `sample`, no other option is needed.
+
+**Option B — EODHD fundamentals endpoint (1 call per ticker)**
+
+```
+GET /api/fundamentals/{TICKER}.US?api_token=...&fmt=json
+```
+
+Returns full fundamental data including `MarketCapitalization`, `Sector`, `Industry`,
+and historical financials. One call per ticker.
+
+- Calls consumed: 1 per ticker on universe build; refreshed periodically (market cap
+  drifts; sector rarely changes).
+- Feasibility on free tier: 20 calls/day. For 15 tickers, feasible if scheduled as a
+  separate metadata session from the daily OHLCV refresh (15 calls/session). For a
+  `us` scope (~3k tickers) it requires ~150 sessions of fundamentals calls — not
+  feasible on free tier.
+- Feasibility on paid tier: viable. `daily_limit` is orders of magnitude higher.
+  The fundamentals endpoint is the canonical metadata source under a paid-tier build.
+- **Verdict for test phase: feasible but wasteful.** Only use if metadata cannot be
+  embedded manually. On paid tier (Option A in §4.1), this is the preferred source.
+
+**Option C — External metadata batch (yfinance or similar)**
+
+Use `yfinance.Ticker(ticker).info` to retrieve market cap and sector for the narrow
+universe. This is a one-time or periodic metadata fetch, separate from the OHLCV
+pipeline.
+
+- Calls consumed: 0 EODHD calls. Yahoo Finance rate limits apply (unofficial, variable).
+- Data quality: adequate for large-cap names; unreliable for less-followed tickers.
+  Market cap figures may lag. Sector taxonomy differs from EODHD's.
+- Legal: Yahoo Finance TOS prohibits automated data extraction for financial product
+  purposes (same concern as multi-source Option B in §4.2).
+- **Verdict: viable as a one-off convenience tool for the test phase if tickers are
+  well-known names. Not suitable for a production metadata pipeline.**
+
+**Option D — Manual metadata cache file**
+
+Maintain a small JSON or CSV file (e.g. `data/sample_meta.json`) with the metadata
+for the 15 tickers. Updated manually when a ticker is added or its sector changes.
+
+- Calls consumed: 0.
+- Maintenance: proportional to universe churn. For a stable 15-ticker list, one update
+  per year at most.
+- **Verdict: simplest possible approach for the test phase. Equivalent to Option A in
+  practice — the constants live in a file rather than in source code.**
+
+**Option E — Compute ADV from stored prices; skip market cap programmatic check for narrow universe**
+
+Average daily value (`min_avg_daily_value`) can be computed from stored OHLCV once
+data is in `tbl_prices` (rolling 20-day mean of `close × volume`). This replaces any
+external ADV field without consuming additional API calls.
+
+Market cap cannot be computed from OHLCV. For the narrow `sample` scope, where all
+tickers are manually curated large-cap names, the `min_market_cap=$750M` filter is
+trivially satisfied by selection — it need not be enforced programmatically.
+
+- Calls consumed: 0.
+- Limitation: provides ADV only; does not supply sector, region, or market cap.
+  Those must still come from Options A, B, C, or D.
+- **Verdict: useful complement to any of the above. Recommended for ADV computation
+  once prices are in storage. Does not replace a metadata source.**
+
+**Recommended strategy for Phase C:**
+
+Use **Option A** (manual constants in `universe.py`) for the `sample` scope. Once
+OHLCV is in storage, compute ADV from stored prices (Option E). Defer the
+`min_market_cap` programmatic filter for `us`/`global` scopes to the production
+sourcing decision (open decision #1). If paid EODHD (§4.1) is chosen for production,
+use the fundamentals endpoint (Option B) for metadata at scale.
 
 ---
 
@@ -863,26 +1006,38 @@ track — plan that separately before beginning.
 
 ---
 
-**Session 1 — Probe and storage schema**
+**Session 1 — Probe and storage schema ✓ COMPLETE**
 
-Resolve open decisions #3, #4, #5 (probe the API). Document real response shapes
-in `data/eodhd.py`. Write `data/storage.py` from scratch: drop `tbl_scan_results`,
-implement the two-layer schema, implement all read/write methods. Write
-`tests/test_storage.py` using in-memory DuckDB (no API calls). Resolve open
-decision #11 (raw_value strategy).
+Both probe sessions are done (Probe 1: 2026-05-16; Probe 2: 2026-05-18). Full
+findings in `spec/eodhd-probe-notes.md`. Resolved open decisions #3 (bulk-EOD
+blocked), #5 (symbol-list fields), #7 (rate-limit mechanism), #11 (raw_value
+strategy). `data/storage.py` is written and green (34 tests). `tbl_scan_results`
+dropped; two-layer schema implemented.
 
-Budget consumed: 2 probe calls.
+Budget consumed: 3 probe calls (2 Probe 1, then 3 Probe 2; 3 total — Probe 1 call
+was an HTTP 423 and counted against budget).
 
 ---
 
-**Session 2 — Rate-limited EODHD client**
+**Session 2 — EODHD client (per-ticker, daily-budget enforcement)**
 
-Extend `data/eodhd.py` with `CallBudget`, the per-minute throttle, and
-`fetch_bulk_today(exchange)` using the shape confirmed in session 1. Ensure the
-per-ticker historical method is also rate-limited. Write `tests/test_eodhd.py`
-using mocked `httpx` responses: verify sleep is called, verify budget raises on
-overage, verify the canonical DataFrame shape is returned. Resolve open decision #8
-(run time) based on probe results.
+Implement `data/eodhd.py` with:
+
+- `CallBudget(daily_limit=20)` — daily counter loaded from `tbl_run_log` on same-day
+  re-run; raises `DailyBudgetExceeded` at the limit. No per-request sleep: the
+  1,200/minute throughput cap (confirmed in Probe 2) is not a binding constraint at
+  20 calls/day.
+- `EODHDClient.fetch_history(ticker, exchange, from_date, to_date)` — calls the
+  per-ticker EOD endpoint (confirmed available on free tier — Probe 2). Returns the
+  canonical DataFrame. Renames `adjusted_close` → `adj_close` on ingest.
+- `use_bulk_eod: bool = False` config flag — structure the client so enabling the
+  bulk-EOD endpoint on a paid tier is a configuration change, not a rewrite. The
+  flag does not activate any code in the free-tier build.
+
+Write `tests/test_eodhd.py` using mocked `httpx` responses: verify the canonical
+DataFrame shape is returned, `adjusted_close` is renamed, `DailyBudgetExceeded` is
+raised at the limit, and a same-day re-run initialises the counter from the stored
+`api_calls_used` value.
 
 Budget consumed: 0 (mocked).
 
@@ -917,8 +1072,8 @@ Budget consumed: 0 (fixtures only).
 **Session 5 — End-to-end test on live API**
 
 Run `uv run scanner run-daily --universe sample` against live EODHD data. This
-session consumes real API calls — plan for up to 17 calls (15 history + 1 bulk + 1
-spare). Schedule on a day with a fresh budget.
+session consumes real API calls — plan for up to 15 calls (one per-ticker EOD
+fetch per ticker). Schedule on a day with a fresh budget.
 
 Verify: DuckDB `tbl_prices` contains 250+ rows per ticker; `tbl_indicator_outputs`
 contains 11 rows per ticker per date; `tbl_combo_results` contains 3 rows per ticker
