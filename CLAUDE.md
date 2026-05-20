@@ -231,10 +231,22 @@ confidently-wrong formula on the first run.
     Covers: canonical shape, adjusted_close rename, budget enforcement (no HTTP call when exhausted),
     counter increment, same-day re-run persistence, error responses (401/403/404/423/429/5xx),
     empty-response handling, network error, use_bulk_eod flag, request params.
+  - `src/scanner/data/universe.py` — **green ✓** (35 tests). Two-stage universe loader.
+    Stage 1: `candidates(scope, *, min_market_cap_usd)` returns candidate tickers (sample: embedded
+    metadata; us/global: raises PaidTierRequired — deferred until open decision #14 is resolved).
+    Stage 2: `apply_post_ingest_filters(candidates_df, storage, ...)` filters by min_history_bars,
+    min_price, and min_avg_daily_value — called by the orchestrator after prices are in storage.
+    `compute_adv(storage, ticker, exchange, *, window)` computes mean daily dollar-volume from stored
+    prices (Option E from §7.1 — zero extra API calls).
+    SAMPLE_UNIVERSE: 15 US large-caps, 9 GICS sectors; user can revise (open decision #2).
+    All filter thresholds are parameters with spec defaults (all settled by user decision).
+    Loader never drives ingestion — it is read-only at both stages.
+  - `tests/test_universe.py` — 35 tests (sample scope shape/filters, PaidTierRequired gates,
+    compute_adv accuracy and window, post-ingest filters: exclude/include at each boundary).
   - `spec/eodhd-probe-notes.md` — both probe sessions complete. Bulk-EOD blocked (HTTP 423).
     Per-ticker EOD confirmed. Rate-limit: 1,200/min throughput + 20/day billing quota.
   - `spec/phase-c-plan.md` — Phase C build plan with open decisions table (§7.1 metadata strategy).
-  - Remaining Phase C: `src/scanner/data/universe.py` (scope loader: sample/us/global), `src/scanner/cli.py`.
+  - Remaining Phase C: `src/scanner/cli.py` (orchestrator + CLI entrypoint).
 - **Phase D scaffolds (exist, untested):** `src/scanner/report/` (excel, email, dashboard
   json), `dashboard/artifact.html`, `.github/workflows/` (daily-scan + ci).
 - `tests/conftest.py`, `tests/test_indicators.py`, `tests/test_scoring.py`,
@@ -285,6 +297,7 @@ data/           local DuckDB — gitignored                        [runtime only
 - `~/bin/uv run python scripts/inspect_box_breakout.py` — eyeball-check; prints boxes found on TSC data (no assertions).
 - `~/bin/uv run pytest tests/test_storage.py` — 34 tests pass (DuckDB storage: schema, upserts, JSON roundtrip, run-log lifecycle).
 - `~/bin/uv run pytest tests/test_eodhd.py` — 46 tests pass (EODHD client: budget enforcement, rename, error handling, request params, bulk-eod flag).
+- `~/bin/uv run pytest tests/test_universe.py` — 35 tests pass (sample scope, market-cap filter, PaidTierRequired gates, compute_adv, post-ingest filter boundaries).
 - `~/bin/uv run ruff check src tests` — passes with 0 errors.
 
 ### Planned (Phase C+)
@@ -298,9 +311,9 @@ data/           local DuckDB — gitignored                        [runtime only
 **Phase A complete ✓. Phase B indicator engine complete ✓. Phase C in progress.**
 RSI ✓, Bollinger ✓, Daily Trend ✓, Volatility ✓, Volume ✓, Stochastic ✓, Box Breakout ✓, MAV Diff Z-Score ✓, MAV Breakout ✓.
 
-239 tests green, 5 xfailed (mav_breakout xfail documented). `~/bin/uv run ruff check src tests scripts` passes.
+274 tests green, 5 xfailed (mav_breakout xfail documented). `~/bin/uv run ruff check src tests scripts` passes.
 
-Phase C progress: `storage.py` ✓ (34 tests), `eodhd.py` ✓ (46 tests). Remaining: `universe.py` (scope loader: sample/us/global), `cli.py` (orchestrator + CLI entrypoint).
+Phase C progress: `storage.py` ✓ (34 tests), `eodhd.py` ✓ (46 tests), `universe.py` ✓ (35 tests). Remaining: `cli.py` (orchestrator + CLI entrypoint).
 
 The Phase B scaffold stubs (scoring.py, test files) are parked in `_phase_b_stubs/` at
 the repo root. Do not re-add until rewritten to pass.
