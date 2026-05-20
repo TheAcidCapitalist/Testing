@@ -5,11 +5,11 @@ from __future__ import annotations
 import json
 from datetime import date
 
+import duckdb
 import pandas as pd
 import pytest
 
 from scanner.data.storage import Storage
-
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -71,7 +71,7 @@ def test_context_manager_closes() -> None:
     with s:
         pass
     # After close, further queries should raise
-    with pytest.raises(Exception):
+    with pytest.raises(duckdb.Error):
         s._con.execute("SELECT 1")
 
 

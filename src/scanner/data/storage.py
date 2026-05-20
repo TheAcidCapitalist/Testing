@@ -295,6 +295,20 @@ class Storage:
             [status, api_calls, run_id],
         )
 
+    def get_api_calls_used(self, run_id: str) -> int:
+        """Return the api_calls_used counter for a run; 0 if run_id not found."""
+        row = self._con.execute(
+            "SELECT api_calls_used FROM tbl_run_log WHERE run_id = ?", [run_id]
+        ).fetchone()
+        return int(row[0]) if row is not None else 0
+
+    def update_api_calls_used(self, run_id: str, count: int) -> None:
+        """Overwrite the api_calls_used counter for a run (no-op if run_id missing)."""
+        self._con.execute(
+            "UPDATE tbl_run_log SET api_calls_used = ? WHERE run_id = ?",
+            [count, run_id],
+        )
+
     def get_completed_tickers(self, run_id: str) -> set[tuple[str, str]]:
         """Return {(ticker, exchange)} for all tickers completed in this run.
 
