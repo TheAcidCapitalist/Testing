@@ -13,7 +13,7 @@ from scanner.data.storage import Storage
 from scanner.data.universe import (
     CANDIDATE_COLUMNS,
     SAMPLE_UNIVERSE,
-    PaidTierRequired,
+    ProductionScopeUnavailable,
     apply_post_ingest_filters,
     candidates,
     compute_adv,
@@ -124,19 +124,19 @@ class TestCandidatesSampleScope:
 
 class TestCandidatesGatedScopes:
     def test_us_raises_paid_tier_required(self):
-        with pytest.raises(PaidTierRequired):
+        with pytest.raises(ProductionScopeUnavailable):
             candidates("us")
 
     def test_global_raises_paid_tier_required(self):
-        with pytest.raises(PaidTierRequired):
+        with pytest.raises(ProductionScopeUnavailable):
             candidates("global")
 
     def test_paid_tier_message_references_spec(self):
-        with pytest.raises(PaidTierRequired, match="phase-c-plan"):
+        with pytest.raises(ProductionScopeUnavailable, match="phase-c-plan"):
             candidates("us")
 
     def test_paid_tier_required_is_exception_subclass(self):
-        assert issubclass(PaidTierRequired, Exception)
+        assert issubclass(ProductionScopeUnavailable, Exception)
 
     def test_unknown_scope_raises_value_error(self):
         with pytest.raises(ValueError, match="Unknown scope"):

@@ -138,12 +138,14 @@ SAMPLE_UNIVERSE: list[dict] = [
 # ── Exception ─────────────────────────────────────────────────────────────────
 
 
-class PaidTierRequired(Exception):
-    """Raised when a scope requires a paid EODHD plan not yet configured.
+class ProductionScopeUnavailable(Exception):
+    """Raised when a scope is not yet available for production use.
 
-    Remove this guard when:
-      1. A paid API key is configured.
-      2. The metadata-source decision has been made (open decision #14).
+    'us' and 'global' scopes are blocked pending the open metadata-source
+    decision (#14 in spec/phase-c-plan.md), not solely on payment — at least
+    one live option (yfinance) is free.  Remove this guard when:
+      1. The metadata-source strategy is resolved (open decision #14).
+      2. The chosen metadata source is implemented.
     See spec/phase-c-plan.md §4 (sourcing options) and §7.1 (metadata strategy).
     """
 
@@ -176,10 +178,10 @@ def candidates(
         df = pd.DataFrame(SAMPLE_UNIVERSE)[CANDIDATE_COLUMNS]
         return df[df["market_cap_usd"] >= min_market_cap_usd].reset_index(drop=True)
     if scope in ("us", "global"):
-        raise PaidTierRequired(
-            f"Scope '{scope}' requires a paid EODHD plan and a resolved metadata "
-            "source.  See spec/phase-c-plan.md §4 (sourcing options) and §7.1 "
-            "(metadata strategy, open decision #14)."
+        raise ProductionScopeUnavailable(
+            f"Scope '{scope}' is not yet available: the metadata-source strategy "
+            "has not been resolved (open decision #14 in spec/phase-c-plan.md).  "
+            "See §4 (sourcing options) and §7.1 (metadata strategy)."
         )
     raise ValueError(
         f"Unknown scope '{scope}'.  Must be one of: sample, us, global."
