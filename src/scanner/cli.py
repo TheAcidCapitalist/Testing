@@ -75,7 +75,6 @@ def run_daily(
     ----------
     scope:
         Universe scope: ``"sample"``, ``"us"``, or ``"global"``.
-        ``"us"`` and ``"global"`` are gated behind ``ProductionScopeUnavailable``.
     db_path:
         Path to the DuckDB database file.  Pass ``":memory:"`` for in-process
         testing.
@@ -115,17 +114,16 @@ def run_daily(
         # ── Start run log ──────────────────────────────────────────────────
         storage.log_run_start(run_id, effective_date, scope)
 
-        # ── Stage 1: load candidate universe ──────────────────────────────
-        candidates_df = candidates(scope)
-        logger.info(
-            "Universe '%s': %d candidates loaded.", scope, len(candidates_df)
-        )
-        storage.write_universe(candidates_df)
-
         # ── Build budget + client ──────────────────────────────────────────
         budget = CallBudget(storage, run_id, daily_limit=daily_budget_limit)
         if client is None:
             client = EODHDClient(budget)
+
+        # ── Stage 1: load candidate universe ──────────────────────────────
+        candidates_df = candidates(scope, client=client, storage=storage)
+        logger.info(
+            "Universe '%s': %d candidates loaded.", scope, len(candidates_df)
+        )
 
         # ── Per-ticker fetch loop ──────────────────────────────────────────
         budget_exhausted = False

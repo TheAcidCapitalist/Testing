@@ -13,7 +13,6 @@ from scanner.data.storage import Storage
 from scanner.data.universe import (
     CANDIDATE_COLUMNS,
     SAMPLE_UNIVERSE,
-    ProductionScopeUnavailable,
     apply_post_ingest_filters,
     candidates,
     compute_adv,
@@ -119,28 +118,98 @@ class TestCandidatesSampleScope:
         assert df["sector"].nunique() >= 5
 
 
-# ── candidates — gated scopes ─────────────────────────────────────────────────
-
+from unittest.mock import MagicMock, patch
+from scanner.data.eodhd import EODHDClient
 
 class TestCandidatesGatedScopes:
-    def test_us_raises_paid_tier_required(self):
-        with pytest.raises(ProductionScopeUnavailable):
+    @pytest.fixture
+    def mock_client(self):
+        c = MagicMock(spec=EODHDClient)
+        # Mock symbol list
+        c.fetch_symbol_list.return_value = pd.DataFrame([
+            {"Code": "A", "Name": "A Corp", "Country": "USA", "Exchange": "US", "Currency": "USD", "Type": "Common Stock", "Isin": "123"},
+            {"Code": "B", "Name": "B Corp", "Country": "USA", "Exchange": "US", "Currency": "USD", "Type": "Common Stock", "Isin": "456"},
+            {"Code": "C", "Name": "C Junk", "Country": "USA", "Exchange": "PINK", "Currency": "USD", "Type": "Common Stock", "Isin": "789"},
+            {"Code": "D", "Name": "D Pref", "Country": "USA", "Exchange": "US", "Currency": "USD", "Type": "Preferred Stock", "Isin": "101"},
+        ])
+        return c
+
+    def test_missing_client_raises_value_error(self, storage):
+        with pytest.raises(ValueError, match="client and storage are required"):
             candidates("us")
-
-    def test_global_raises_paid_tier_required(self):
-        with pytest.raises(ProductionScopeUnavailable):
-            candidates("global")
-
-    def test_production_scope_message_references_spec(self):
-        with pytest.raises(ProductionScopeUnavailable, match="decision #14"):
-            candidates("us")
-
-    def test_production_scope_unavailable_is_exception_subclass(self):
-        assert issubclass(ProductionScopeUnavailable, Exception)
 
     def test_unknown_scope_raises_value_error(self):
         with pytest.raises(ValueError, match="Unknown scope"):
             candidates("narrow")  # type: ignore[arg-type]
+
+    @patch("scanner.data.yfinance_meta.fetch_yfinance_meta")
+    def test_us_scope_filters_and_merges_metadata(self, mock_yf, mock_client, storage):
+        mock_yf.return_value = pd.DataFrame([
+            {"ticker": "A", "market_cap": 2e9, "sector": "Tech", "country": "USA"},
+            {"ticker": "B", "market_cap": 500e6, "sector": "Health", "country": "USA"},
+        ])
+        
+        df = candidates("us", client=mock_client, storage=storage, min_market_cap_usd=1e9)
+        
+        # 'C' dropped because PINK exchange
+        # 'D' dropped because Preferred Stock
+        # 'B' dropped because market cap 500e6 < 1e9
+        assert len(df) == 1
+        assert df.iloc[0]["ticker"] == "A"
+        assert df.iloc[0]["market_cap_usd"] == 2e9
+        mock_yf.assert_called_once()
+        called_tickers = mock_yf.call_args[0][0]
+        assert set(called_tickers) == {"A", "B"}
+
+    @patch("scanner.data.yfinance_meta.fetch_yfinance_meta")
+    def test_missing_metadata_is_excluded(self, mock_yf, mock_client, storage):
+        mock_yf.return_value = pd.DataFrame([
+            {"ticker": "A", "market_cap": None, "sector": None, "country": None},
+            {"ticker": "B", "market_cap": 2e9, "sector": "Tech", "country": "USA"},
+        ])
+        df = candidates("us", client=mock_client, storage=storage, min_market_cap_usd=1e9)
+        assert len(df) == 1
+        assert df.iloc[0]["ticker"] == "B"
+
+    @patch("scanner.data.yfinance_meta.fetch_yfinance_meta")
+    def test_uses_cached_metadata_if_valid(self, mock_yf, mock_client, storage):
+        # Pre-seed cache for ticker A
+        cached = pd.DataFrame([{
+            "ticker": "A", "exchange": "US", "name": "A Corp", "currency": "USD",
+            "market_cap_usd": 3e9, "sector": "Tech", "region": "USA"
+        }])
+        storage.write_universe(cached)
+        
+        # B is missing from cache
+        mock_yf.return_value = pd.DataFrame([
+            {"ticker": "B", "market_cap": 4e9, "sector": "Health", "country": "USA"},
+        ])
+        
+        df = candidates("us", client=mock_client, storage=storage, min_market_cap_usd=1e9)
+        
+        assert len(df) == 2
+        # A should use cached 3e9, not trigger fetch
+        assert df.loc[df["ticker"] == "A", "market_cap_usd"].iloc[0] == 3e9
+        assert df.loc[df["ticker"] == "B", "market_cap_usd"].iloc[0] == 4e9
+        
+        # yfinance should only have been called for B
+        called_tickers = mock_yf.call_args[0][0]
+        assert list(called_tickers) == ["B"]
+
+    @patch("scanner.data.yfinance_meta.fetch_yfinance_meta")
+    def test_respects_max_metadata_fetches(self, mock_yf, mock_client, storage):
+        # 2 symbols (A, B) need fetches. We limit to 1.
+        mock_yf.return_value = pd.DataFrame([
+            {"ticker": "A", "market_cap": 4e9, "sector": "Tech", "country": "USA"},
+        ])
+        
+        df = candidates("us", client=mock_client, storage=storage, min_market_cap_usd=1e9, max_metadata_fetches_per_run=1)
+        
+        # Only A should be fetched and returned. B should be deferred (excluded).
+        assert len(df) == 1
+        assert df.iloc[0]["ticker"] == "A"
+        called_tickers = mock_yf.call_args[0][0]
+        assert len(called_tickers) == 1
 
 
 # ── compute_adv ───────────────────────────────────────────────────────────────

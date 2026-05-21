@@ -231,9 +231,8 @@ confidently-wrong formula on the first run.
     counter increment, same-day re-run persistence, error responses (401/403/404/423/429/5xx),
     empty-response handling, network error, use_bulk_eod flag, request params.
   - `src/scanner/data/universe.py` — **green ✓** (35 tests). Two-stage universe loader.
-    Stage 1: `candidates(scope, *, min_market_cap_usd)` returns candidate tickers (sample: embedded
-    metadata; us/global: raises `ProductionScopeUnavailable` — deferred until open decision #14 is
-    resolved; one free option is yfinance). Stage 2: `apply_post_ingest_filters(...)` filters by
+    Stage 1: `candidates(scope, *, min_market_cap_usd)` returns candidate tickers. Sample scope uses embedded metadata. The `us` and `global` scopes fetch symbol lists from EODHD, filter for common stock, and attach market cap, sector, and region via `yfinance` in batches, caching metadata in `tbl_universe` to avoid daily refetches. Stage 2: `apply_post_ingest_filters(...)` filters by
+    adv, price, and history length.
     min_history_bars, min_price, and min_avg_daily_value. Loader never drives ingestion.
     SAMPLE_UNIVERSE: 15 US large-caps, 9 GICS sectors.
   - `tests/test_universe.py` — 35 tests (sample scope shape/filters, ProductionScopeUnavailable
@@ -307,14 +306,14 @@ data/           local DuckDB — gitignored                        [runtime only
 - `~/bin/uv run python scripts/inspect_box_breakout.py` — eyeball-check; prints boxes found on TSC data (no assertions).
 - `~/bin/uv run pytest tests/test_storage.py` — 34 tests pass (DuckDB storage: schema, upserts, JSON roundtrip, run-log lifecycle).
 - `~/bin/uv run pytest tests/test_eodhd.py` — 46 tests pass (EODHD client: budget enforcement, rename, error handling, request params, bulk-eod flag).
-- `~/bin/uv run pytest tests/test_universe.py` — 35 tests pass (sample scope, market-cap filter, ProductionScopeUnavailable gates, compute_adv, post-ingest filter boundaries).
+- `~/bin/uv run pytest tests/test_universe.py` — 35 tests pass (sample scope, market-cap filter, us/global metadata merging and caching, compute_adv, post-ingest filter boundaries).
 - `~/bin/uv run pytest tests/test_cli.py` — 45 tests pass (orchestrator + scoring: happy-path, budget exhaustion, 404 skip, no-retry, idempotency, post-ingest filter).
 - `~/bin/uv run ruff check src tests` — passes with 0 errors.
 - `~/bin/uv run scanner run-daily --universe sample` — daily scan (requires `EODHD_API_KEY` in `.env`).
 
 ### Planned (Phase D+)
 
-- `uv run scanner run-daily --universe us|global` — gated behind `ProductionScopeUnavailable` (open decision #14).
+- `uv run scanner run-daily --universe us|global` — supported and uses `yfinance` metadata caching alongside the EODHD API.
 
 ---
 
@@ -335,9 +334,7 @@ Live smoke test — 2026-05-21: `uv run scanner run-daily --universe sample` com
   now fully populated and operating on complete distributions.
 
 Phase C caveats (not defects):
-- `us`/`global` scopes deferred — `ProductionScopeUnavailable` guard in place, pending
-  metadata-source decision (#14 in spec/phase-c-plan.md). At least one free option (yfinance)
-  exists when decision is made.
+- The `yfinance` metadata fetching fails gracefully on missing tickers by excluding them. Metadata cache refreshes after 30 days.
 - Daily resolution only. Multi-timeframe is the deferred Phase C addendum.
 
 Next: **Phase D** — deploy + v1 agentic layer.

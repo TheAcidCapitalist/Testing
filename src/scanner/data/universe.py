@@ -8,8 +8,8 @@ explicit stages so the loader never needs to drive ingestion:
     sector, region) for all tickers in the scope that pass the market-cap filter.
     For the 'sample' scope: metadata is embedded as constants (Option A from
     spec/phase-c-plan.md §7.1).  Zero API calls consumed.
-    For 'us' and 'global': raises ProductionScopeUnavailable — deferred until the
-    metadata-source decision (#14) is implemented.
+    For 'us' and 'global': fetches symbol lists, filters common stock, and
+    attaches metadata from yfinance.
 
   Stage 2 — apply_post_ingest_filters(candidates, storage, ...)
     Filters the candidate list using data that only becomes available *after*
@@ -27,8 +27,11 @@ the metadata-source strategy that determines how 'us' / 'global' will be built.
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal
+import logging
 
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from scanner.data.storage import Storage
@@ -138,33 +141,30 @@ SAMPLE_UNIVERSE: list[dict] = [
 # ── Exception ─────────────────────────────────────────────────────────────────
 
 
-class ProductionScopeUnavailable(Exception):
-    """Raised when a scope is not yet available for production use.
-
-    'us' and 'global' scopes are blocked pending the open metadata-source
-    decision (#14 in spec/phase-c-plan.md), not solely on payment — at least
-    one live option (yfinance) is free.  Remove this guard when:
-      1. The metadata-source strategy is resolved (open decision #14).
-      2. The chosen metadata source is implemented.
-    See spec/phase-c-plan.md §4 (sourcing options) and §7.1 (metadata strategy).
-    """
-
-
 # ── Stage 1: candidate universe ───────────────────────────────────────────────
 
 
 def candidates(
     scope: Literal["sample", "us", "global"],
     *,
+    client: EODHDClient | None = None,
+    storage: Storage | None = None,
     min_market_cap_usd: float = 750_000_000,
+    metadata_refresh_days: int = 30,
+    max_metadata_fetches_per_run: int = 500,
 ) -> pd.DataFrame:
     """Return candidate tickers that pass the market-cap filter.  Stage 1.
 
     For ``'sample'``: returns the curated list with embedded metadata,
     filtered by ``min_market_cap_usd``.  Zero API calls consumed.
 
-    For ``'us'`` and ``'global'``: raises :exc:`ProductionScopeUnavailable`.  These
-    scopes are deferred pending implementation of the metadata-source decision (#14).
+    For ``'us'`` and ``'global'``: fetches symbol lists from EODHD, filters for 
+    Common Stock, and retrieves market cap, sector, and country metadata 
+    from yfinance. Missing metadata is excluded.
+    The yfinance metadata is cached in storage (tbl_universe) and refreshed 
+    according to ``metadata_refresh_days``.
+    Note: The loader does NOT cap or throttle. A large global scope becomes 
+    a rolling multi-day backfill handled by the orchestrator's budget logic.
 
     Returns a DataFrame with columns ``CANDIDATE_COLUMNS``:
     ticker, exchange, name, currency, market_cap_usd, sector, region.
@@ -176,14 +176,95 @@ def candidates(
     if scope == "sample":
         df = pd.DataFrame(SAMPLE_UNIVERSE)[CANDIDATE_COLUMNS]
         return df[df["market_cap_usd"] >= min_market_cap_usd].reset_index(drop=True)
+
     if scope in ("us", "global"):
-        raise ProductionScopeUnavailable(
-            "The 'us' and 'global' scopes are deferred pending implementation of "
-            "metadata-source decision #14 (yfinance)."
+        if client is None or storage is None:
+            raise ValueError(f"client and storage are required for scope '{scope}'")
+
+        exchanges = ["US"] if scope == "us" else ["US", "LSE", "TO", "PA", "XETRA", "TSE", "HK", "ASX"]
+        df_list = []
+        for ex in exchanges:
+            try:
+                df_ex = client.fetch_symbol_list(ex)
+                # Drop PINK and keep only Common Stock
+                df_ex = df_ex[(df_ex["Type"] == "Common Stock") & (df_ex["Exchange"] != "PINK")]
+                df_list.append(df_ex)
+            except Exception as exc:
+                logger.warning("Failed to fetch symbol list for exchange %s: %s", ex, exc)
+                continue
+
+        if not df_list:
+            return pd.DataFrame(columns=CANDIDATE_COLUMNS)
+
+        all_symbols = pd.concat(df_list, ignore_index=True)
+        all_symbols = all_symbols.rename(columns={
+            "Code": "ticker",
+            "Exchange": "exchange",
+            "Name": "name",
+            "Currency": "currency",
+            "Country": "region"
+        })
+
+        # Load cache
+        cached = storage.read_universe()
+        
+        now = pd.Timestamp.now()
+        threshold = now - pd.Timedelta(days=metadata_refresh_days)
+        valid_cache = cached[cached["updated_at"] >= threshold].copy()
+
+        # Merge current symbols with valid cache to find what needs fetching
+        merged = all_symbols.merge(
+            valid_cache[["ticker", "exchange", "market_cap_usd", "sector"]],
+            on=["ticker", "exchange"],
+            how="left"
         )
-    raise ValueError(
-        f"Unknown scope '{scope}'.  Must be one of: sample, us, global."
-    )
+
+        missing_mask = merged["market_cap_usd"].isna() | merged["sector"].isna()
+        missing_tickers = merged.loc[missing_mask, "ticker"].tolist()
+
+        if missing_tickers:
+            from scanner.data.yfinance_meta import fetch_yfinance_meta
+            
+            # Throttle-respecting batch limit
+            batch = missing_tickers[:max_metadata_fetches_per_run]
+            
+            logger.info("Fetching yfinance metadata for %d missing/expired tickers...", len(batch))
+            new_meta = fetch_yfinance_meta(batch)
+            
+            # Prepare rows to write to cache
+            cache_updates = all_symbols[all_symbols["ticker"].isin(batch)].copy()
+            new_meta_renamed = new_meta.rename(columns={
+                "market_cap": "market_cap_usd",
+                "country": "fetched_region"
+            })
+            cache_updates = cache_updates.merge(new_meta_renamed, on="ticker", how="left")
+            
+            # Update region if yfinance returned one
+            cache_updates["region"] = cache_updates["fetched_region"].combine_first(cache_updates["region"])
+            
+            # Ensure exactly CANDIDATE_COLUMNS are written to storage
+            cache_updates = cache_updates[CANDIDATE_COLUMNS]
+            
+            # Persist to cache (including Nones for failed fetches)
+            storage.write_universe(cache_updates)
+            
+            # Update `merged` DataFrame so we can evaluate these tickers in this run
+            merged_idx = merged.set_index("ticker")
+            cache_updates_idx = cache_updates.set_index("ticker")
+            merged_idx.update(cache_updates_idx)
+            merged = merged_idx.reset_index()
+
+        # Choice flagged in prompt: exclude tickers that failed to return a market cap
+        # because the liquidity filters cannot be correctly applied without it.
+        final_df = merged.dropna(subset=["market_cap_usd"]).copy()
+        
+        # Apply min_market_cap filter
+        final_df = final_df[final_df["market_cap_usd"] >= min_market_cap_usd].copy()
+
+        final_df = final_df[CANDIDATE_COLUMNS]
+        return final_df.reset_index(drop=True)
+
+    raise ValueError(f"Unknown scope '{scope}'.  Must be one of: sample, us, global.")
 
 
 # ── ADV helper ────────────────────────────────────────────────────────────────
