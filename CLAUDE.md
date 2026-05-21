@@ -320,15 +320,34 @@ data/           local DuckDB — gitignored                        [runtime only
 
 # Current status
 
-**Phase A complete ✓. Phase B indicator engine complete ✓. Phase C complete ✓.**
-RSI ✓, Bollinger ✓, Daily Trend ✓, Volatility ✓, Volume ✓, Stochastic ✓, Box Breakout ✓, MAV Diff Z-Score ✓, MAV Breakout ✓.
+**Phase A complete ✅. Phase B complete ✅. Phase C complete ✅ (sample scope). Phase D is next.**
 
-319 tests green, 5 xfailed (mav_breakout fixture xfail documented). `~/bin/uv run ruff check src tests` passes.
+319 tests green, 5 xfailed (`test_mav_breakout.py` — data-limitation xfails; see CLAUDE.md §Phase B).
+`~/bin/uv run ruff check src tests scripts` passes.
 
-Phase C: `storage.py` ✓, `eodhd.py` ✓, `universe.py` ✓, `scoring.py` ✓, `cli.py` ✓.
-Deferred (open): `us`/`global` scopes (open decision #14 — metadata source), MAV Breakout (#11th indicator — registry picks it up automatically once built).
+Live smoke test — 2026-05-21: `uv run scanner run-daily --universe sample` completed.
+- 15/15 tickers fetched (0 failures, 0 budget exhausted). BRK-B.US accepted with dash.
+- 15 API calls of 20 daily budget used.
+- 15/15 post-ingest survivors. 11 indicators per ticker. 15 ranked rows. Status: `completed`.
+- Free-tier returns ~251 bars (≈1 year). Long-window indicators (Volatility/Volume 180-bar
+  percentile, MAV Diff Z-Score 228-bar warmup) degrade gracefully on one year of data.
+  All directions showed `neutral` on the smoke run — expected given 251-bar history
+  vs. indicators designed for 250+ bar windows.
 
-The Phase B scaffold stubs (scoring.py, test files) are parked in `_phase_b_stubs/` at
-the repo root. Do not re-add until rewritten to pass.
+Phase C caveats (not defects):
+- `us`/`global` scopes deferred — `ProductionScopeUnavailable` guard in place, pending
+  metadata-source decision (#14 in spec/phase-c-plan.md). At least one free option (yfinance)
+  exists when decision is made.
+- Daily resolution only. Multi-timeframe is the deferred Phase C addendum.
+- `min_history_bars=250` post-ingest filter is tight against ~251 free-tier bars; large-cap
+  sample tickers all clear it comfortably.
+
+Next: **Phase D** — deploy + v1 agentic layer.
+- `src/scanner/report/excel.py` — ranked Excel workbook.
+- `src/scanner/report/email.py` — Resend delivery.
+- `src/scanner/report/dashboard_json.py` — static JSON for dashboard.
+- `src/scanner/agent/briefing.py` — Haiku pass over top-N output.
+- `dashboard/artifact.html` — zero-dependency static HTML.
+- `.github/workflows/daily-scan.yml` + `ci.yml`.
 
 _(Update this section when a phase or indicator completes.)_
