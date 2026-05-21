@@ -286,9 +286,62 @@ class EODHDClient:
 
         return self._normalise(pd.DataFrame(data))
 
+    def fetch_symbol_list(self, exchange: str) -> pd.DataFrame:
+        """Fetch the symbol list for an exchange from EODHD.
+
+        Returns a DataFrame containing the 7 fields: Code, Name, Country,
+        Exchange, Currency, Type, Isin.
+
+        Parameters
+        ----------
+        exchange:
+            Exchange code, e.g. ``'US'`` or ``'LSE'``.
+
+        Raises
+        ------
+        DailyBudgetExceeded
+            If the budget would be exceeded.  Raised *before* the HTTP call.
+        EODHDAuthError, EODHDForbiddenError, EODHDNotFoundError, EODHDThrottleError,
+        EODHDServerError, EODHDError
+            On HTTP or network errors.
+        """
+        self._budget.check(1)
+
+        params: dict[str, str] = {
+            "api_token": self._api_key,
+            "fmt": "json",
+        }
+
+        url = f"{_BASE_URL}/exchange-symbol-list/{exchange}"
+        try:
+            response = httpx.get(url, params=params, timeout=30)
+        except httpx.RequestError as exc:
+            raise EODHDError(f"Network error fetching symbol list for '{exchange}': {exc}") from exc
+
+        # Only charge budget for calls EODHD actually bills (2xx and 404).
+        if response.status_code in (200, 404):
+            self._budget.charge(1)
+
+        self._handle_status(response, exchange)
+
+        data = response.json()
+        if not data:
+            raise EODHDNotFoundError(
+                f"EODHD returned an empty array for exchange '{exchange}'."
+            )
+
+        df = pd.DataFrame(data)
+        columns = ["Code", "Name", "Country", "Exchange", "Currency", "Type", "Isin"]
+        
+        for col in columns:
+            if col not in df.columns:
+                df[col] = None
+                
+        return df[columns]
+
     # ── Private helpers ───────────────────────────────────────────────────────
 
-    def _handle_status(self, response: httpx.Response, ticker: str) -> None:
+    def _handle_status(self, response: httpx.Response, resource_id: str) -> None:
         """Raise a typed exception for any non-200 status code."""
         status = response.status_code
         if status == 200:
@@ -301,7 +354,7 @@ class EODHDClient:
                 "See spec/phase-c-plan.md §4 for the production sourcing options."
             )
         if status == 404:
-            raise EODHDNotFoundError(f"404 — ticker '{ticker}' not found on EODHD.")
+            raise EODHDNotFoundError(f"404 — resource '{resource_id}' not found on EODHD.")
         if status == 429:
             raise EODHDThrottleError(
                 "429 Too Many Requests — per-minute throughput cap hit. "

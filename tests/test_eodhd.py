@@ -222,6 +222,86 @@ class TestFetchEodHappyPath:
         assert len(df) == len(_SAMPLE_BARS)
 
 
+# ── Fetch Symbol List ─────────────────────────────────────────────────────────
+
+_SAMPLE_SYMBOLS = [
+    {
+        "Code": "A",
+        "Name": "Agilent Technologies Inc",
+        "Country": "USA",
+        "Exchange": "NYSE",
+        "Currency": "USD",
+        "Type": "Common Stock",
+        "Isin": "US00846U1016"
+    },
+    {
+        "Code": "AA",
+        "Name": "Alcoa Corp",
+        "Country": "USA",
+        "Exchange": "NYSE",
+        "Currency": "USD",
+        "Type": "Common Stock",
+        "Isin": "US0138721065"
+    }
+]
+
+class TestFetchSymbolList:
+    def test_happy_path_returns_dataframe(self, client):
+        with patch("httpx.get", return_value=_ok(data=_SAMPLE_SYMBOLS)):
+            df = client.fetch_symbol_list("US")
+            
+        assert isinstance(df, pd.DataFrame)
+        assert len(df) == 2
+        assert list(df.columns) == ["Code", "Name", "Country", "Exchange", "Currency", "Type", "Isin"]
+        
+    def test_budget_exceeded_raises_before_http_call(self, storage):
+        storage.update_api_calls_used(_RUN_ID, _DAILY_LIMIT)
+        b = CallBudget(storage, _RUN_ID, daily_limit=_DAILY_LIMIT)
+        c = EODHDClient(b, api_key="testkey")
+
+        with patch("httpx.get") as mock_get:
+            with pytest.raises(DailyBudgetExceeded):
+                c.fetch_symbol_list("US")
+            mock_get.assert_not_called()
+            
+    def test_counter_incremented_on_success(self, storage):
+        b = CallBudget(storage, _RUN_ID, daily_limit=_DAILY_LIMIT)
+        c = EODHDClient(b, api_key="testkey")
+
+        with patch("httpx.get", return_value=_ok(data=_SAMPLE_SYMBOLS)):
+            c.fetch_symbol_list("US")
+
+        assert storage.get_api_calls_used(_RUN_ID) == 1
+        
+    @pytest.mark.parametrize("status_code, expected_exc", [
+        (401, EODHDAuthError),
+        (403, EODHDForbiddenError),
+        (423, EODHDForbiddenError),
+        (429, EODHDThrottleError),
+        (500, EODHDServerError),
+        (503, EODHDServerError),
+    ])
+    def test_counter_not_incremented_on_unbilled_errors(self, storage, status_code, expected_exc):
+        b = CallBudget(storage, _RUN_ID, daily_limit=_DAILY_LIMIT)
+        c = EODHDClient(b, api_key="testkey")
+
+        with patch("httpx.get", return_value=_err(status_code)):
+            with pytest.raises(expected_exc):
+                c.fetch_symbol_list("US")
+
+        assert storage.get_api_calls_used(_RUN_ID) == 0
+
+    def test_404_charges_budget_and_raises(self, storage):
+        b = CallBudget(storage, _RUN_ID, daily_limit=_DAILY_LIMIT)
+        c = EODHDClient(b, api_key="testkey")
+
+        with patch("httpx.get", return_value=_err(404)):
+            with pytest.raises(EODHDNotFoundError):
+                c.fetch_symbol_list("ZZZZ")
+
+        assert storage.get_api_calls_used(_RUN_ID) == 1
+
+
 # ── Budget enforcement ────────────────────────────────────────────────────────
 
 
