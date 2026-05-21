@@ -208,8 +208,7 @@ confidently-wrong formula on the first run.
     flat_then_breakout_down,false_poke,too_short,trending_no_box,recency_expired}.csv`.
   - `scripts/inspect_box_breakout.py` — eyeball-check script (not a pytest test).
   - `src/scanner/indicators/__init__.py` — registry (auto-discovers non-underscore modules, `NAME` attribute).
-  - `src/scanner/scoring.py` — combo + ranking skeleton (not yet green).
-- **Phase C (in progress):**
+- **Phase C (complete ✓):**
   - `src/scanner/data/storage.py` — **green ✓** (34 tests + 2 new methods). DuckDB two-layer storage.
     Layer 1: `tbl_indicator_outputs` (ticker, exchange, date, indicator_name) — source of truth.
     Layer 2: `tbl_combo_results` (ticker, exchange, date, combination_name) — derived, recomputable.
@@ -233,24 +232,35 @@ confidently-wrong formula on the first run.
     empty-response handling, network error, use_bulk_eod flag, request params.
   - `src/scanner/data/universe.py` — **green ✓** (35 tests). Two-stage universe loader.
     Stage 1: `candidates(scope, *, min_market_cap_usd)` returns candidate tickers (sample: embedded
-    metadata; us/global: raises PaidTierRequired — deferred until open decision #14 is resolved).
-    Stage 2: `apply_post_ingest_filters(candidates_df, storage, ...)` filters by min_history_bars,
-    min_price, and min_avg_daily_value — called by the orchestrator after prices are in storage.
-    `compute_adv(storage, ticker, exchange, *, window)` computes mean daily dollar-volume from stored
-    prices (Option E from §7.1 — zero extra API calls).
-    SAMPLE_UNIVERSE: 15 US large-caps, 9 GICS sectors; user can revise (open decision #2).
-    All filter thresholds are parameters with spec defaults (all settled by user decision).
-    Loader never drives ingestion — it is read-only at both stages.
-  - `tests/test_universe.py` — 35 tests (sample scope shape/filters, PaidTierRequired gates,
-    compute_adv accuracy and window, post-ingest filters: exclude/include at each boundary).
+    metadata; us/global: raises `ProductionScopeUnavailable` — deferred until open decision #14 is
+    resolved; one free option is yfinance). Stage 2: `apply_post_ingest_filters(...)` filters by
+    min_history_bars, min_price, and min_avg_daily_value. Loader never drives ingestion.
+    SAMPLE_UNIVERSE: 15 US large-caps, 9 GICS sectors.
+  - `tests/test_universe.py` — 35 tests (sample scope shape/filters, ProductionScopeUnavailable
+    gates, compute_adv accuracy, post-ingest filter boundaries).
   - `spec/eodhd-probe-notes.md` — both probe sessions complete. Bulk-EOD blocked (HTTP 423).
     Per-ticker EOD confirmed. Rate-limit: 1,200/min throughput + 20/day billing quota.
   - `spec/phase-c-plan.md` — Phase C build plan with open decisions table (§7.1 metadata strategy).
-  - Remaining Phase C: `src/scanner/cli.py` (orchestrator + CLI entrypoint).
+  - `src/scanner/scoring.py` — **green ✓** (see test_cli.py). Stage 1: `normalize(indicator_name,
+    raw_dict)` → [0,1]. Stage 2: `score_tickers(outputs, run_date, combination_name)` → ranked
+    DataFrame. Three seeded combinations: `default`, `breakout_family`, `mean_reversion`.
+    Bollinger normal/contrarian use direction-based normalization (buy→0.25, sell→0.75) — their
+    `signal_value` is the raw z-score, not the three-value combo score.
+    `mav_diff_z` returns `None` from `normalize()` — not in any combo (backtest exit only).
+    Rank weights: w_agree=0.40, w_magnitude=0.30, w_confirm=0.20, w_staleness=0.10, w_mtf=0.0.
+  - `src/scanner/cli.py` — **green ✓** (45 tests). Orchestrator + CLI entrypoint.
+    `run_daily(scope, *, db_path, client, run_date, daily_budget_limit, output_path)` — injectable
+    client for testing. Budget-aware loop: DailyBudgetExceeded stops fetching, run continues with
+    stored data. Fetch idempotency: latest stored date >= run_date → skip fetch. No retry within
+    run: failed fetch (404/5xx/network) logged and skipped. Single-ticker failure doesn't crash run.
+    Daily resolution only — resolution="daily" is the implicit schema value (MTF is v2).
+    No report/email/LLM — Phase D. Verification dump: top-10 ranked rows to stdout or CSV.
+    CLI: `scanner run-daily --universe sample [--output-path PATH]`.
+  - `tests/test_cli.py` — 45 tests. Mock EODHD client; real tmp-path DuckDB. Covers: happy-path
+    (3 tickers: stored OHLCV + indicator outputs + combo results), budget exhaustion mid-loop,
+    failing ticker (404), no-retry, fetch idempotency, storage idempotency, post-ingest filter.
 - **Phase D scaffolds (exist, untested):** `src/scanner/report/` (excel, email, dashboard
   json), `dashboard/artifact.html`, `.github/workflows/` (daily-scan + ci).
-- `tests/conftest.py`, `tests/test_indicators.py`, `tests/test_scoring.py`,
-  `tests/test_tsc_regression.py` — tests exist and currently **fail** (indicators not green).
 
 ## Does not exist yet
 
@@ -297,23 +307,26 @@ data/           local DuckDB — gitignored                        [runtime only
 - `~/bin/uv run python scripts/inspect_box_breakout.py` — eyeball-check; prints boxes found on TSC data (no assertions).
 - `~/bin/uv run pytest tests/test_storage.py` — 34 tests pass (DuckDB storage: schema, upserts, JSON roundtrip, run-log lifecycle).
 - `~/bin/uv run pytest tests/test_eodhd.py` — 46 tests pass (EODHD client: budget enforcement, rename, error handling, request params, bulk-eod flag).
-- `~/bin/uv run pytest tests/test_universe.py` — 35 tests pass (sample scope, market-cap filter, PaidTierRequired gates, compute_adv, post-ingest filter boundaries).
+- `~/bin/uv run pytest tests/test_universe.py` — 35 tests pass (sample scope, market-cap filter, ProductionScopeUnavailable gates, compute_adv, post-ingest filter boundaries).
+- `~/bin/uv run pytest tests/test_cli.py` — 45 tests pass (orchestrator + scoring: happy-path, budget exhaustion, 404 skip, no-retry, idempotency, post-ingest filter).
 - `~/bin/uv run ruff check src tests` — passes with 0 errors.
+- `~/bin/uv run scanner run-daily --universe sample` — daily scan (requires `EODHD_API_KEY` in `.env`).
 
-### Planned (Phase C+)
+### Planned (Phase D+)
 
-- `uv run scanner run-daily --universe sample|us|global` — the daily scan.
+- `uv run scanner run-daily --universe us|global` — gated behind `ProductionScopeUnavailable` (open decision #14).
 
 ---
 
 # Current status
 
-**Phase A complete ✓. Phase B indicator engine complete ✓. Phase C in progress.**
+**Phase A complete ✓. Phase B indicator engine complete ✓. Phase C complete ✓.**
 RSI ✓, Bollinger ✓, Daily Trend ✓, Volatility ✓, Volume ✓, Stochastic ✓, Box Breakout ✓, MAV Diff Z-Score ✓, MAV Breakout ✓.
 
-274 tests green, 5 xfailed (mav_breakout xfail documented). `~/bin/uv run ruff check src tests scripts` passes.
+319 tests green, 5 xfailed (mav_breakout fixture xfail documented). `~/bin/uv run ruff check src tests` passes.
 
-Phase C progress: `storage.py` ✓ (34 tests), `eodhd.py` ✓ (46 tests), `universe.py` ✓ (35 tests). Remaining: `cli.py` (orchestrator + CLI entrypoint).
+Phase C: `storage.py` ✓, `eodhd.py` ✓, `universe.py` ✓, `scoring.py` ✓, `cli.py` ✓.
+Deferred (open): `us`/`global` scopes (open decision #14 — metadata source), MAV Breakout (#11th indicator — registry picks it up automatically once built).
 
 The Phase B scaffold stubs (scoring.py, test files) are parked in `_phase_b_stubs/` at
 the repo root. Do not re-add until rewritten to pass.
