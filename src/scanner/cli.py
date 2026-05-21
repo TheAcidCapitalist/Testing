@@ -67,6 +67,7 @@ def run_daily(
     run_date: date | None = None,
     daily_budget_limit: int = _DEFAULT_DAILY_LIMIT,
     output_path: str | None = None,
+    backfill: bool = False,
 ) -> dict:
     """Orchestrate the daily scan for the given universe scope.
 
@@ -90,6 +91,9 @@ def run_daily(
     output_path:
         If set, write the ranked results CSV to this path.  If ``None``,
         print the top-10 rows to stdout.
+    backfill:
+        If ``True``, bypass fetch idempotency checks and force a full EODHD
+        re-fetch for all tickers in the scope.
 
     Returns
     -------
@@ -134,17 +138,18 @@ def run_daily(
             exchange: str = row["exchange"]
             eodhd_ticker = f"{ticker}.{exchange}"
 
-            # Fetch idempotency: skip if today's bar is already stored.
-            existing = storage.read_prices(ticker, exchange)
-            if not existing.empty:
-                latest_stored = pd.Timestamp(existing["date"].max()).date()
-                if latest_stored >= effective_date:
-                    logger.info(
-                        "[%s] today's bar already stored (%s) — skipping fetch.",
-                        ticker, latest_stored,
-                    )
-                    n_skipped_idempotent += 1
-                    continue
+            # Fetch idempotency: skip if today's bar is already stored, unless backfill is True.
+            if not backfill:
+                existing = storage.read_prices(ticker, exchange)
+                if not existing.empty:
+                    latest_stored = pd.Timestamp(existing["date"].max()).date()
+                    if latest_stored >= effective_date:
+                        logger.info(
+                            "[%s] today's bar already stored (%s) — skipping fetch.",
+                            ticker, latest_stored,
+                        )
+                        n_skipped_idempotent += 1
+                        continue
 
             if budget_exhausted:
                 logger.debug("[%s] budget exhausted — skipping.", ticker)
@@ -336,6 +341,11 @@ def main() -> None:
         metavar="PATH",
         help="Write ranked CSV to PATH instead of printing to stdout.",
     )
+    run_p.add_argument(
+        "--backfill",
+        action="store_true",
+        help="Force full re-fetch of all tickers, bypassing idempotency checks.",
+    )
 
     args = parser.parse_args()
 
@@ -344,6 +354,7 @@ def main() -> None:
             summary = run_daily(
                 scope=args.universe,
                 output_path=args.output_path,
+                backfill=args.backfill,
             )
             print(
                 f"[scanner] run-daily complete: "

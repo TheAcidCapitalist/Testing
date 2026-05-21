@@ -504,6 +504,31 @@ class TestFetchIdempotency:
         for call in client.fetch_eod.call_args_list:
             assert "AAPL" not in str(call)
 
+    def test_backfill_flag_forces_refetch(self, tmp_path):
+        """A ticker whose today's bar is already in storage MUST be refetched if backfill=True."""
+        db = _db(tmp_path)
+        with Storage(db) as s:
+            s.log_run_start("setup", _TODAY, "sample")
+            prices = _make_prices(300)
+            prices.iloc[-1, prices.columns.get_loc("date")] = _TODAY
+            s.write_prices("AAPL", "US", prices)
+
+        client = MagicMock()
+        client.fetch_eod.return_value = _make_prices(300)
+
+        with patch("scanner.data.universe.SAMPLE_UNIVERSE", _sample_universe(["AAPL"])):
+            summary = run_daily(
+                scope="sample",
+                db_path=db,
+                client=client,
+                run_date=_TODAY,
+                backfill=True,
+            )
+
+        assert summary["fetched"] == 1
+        assert summary["skipped_idempotent"] == 0
+        client.fetch_eod.assert_called_once_with("AAPL.US")
+
     def test_ticker_with_older_bar_is_fetched(self, tmp_path):
         """A ticker whose latest bar is yesterday must be fetched."""
         db = _db(tmp_path)
