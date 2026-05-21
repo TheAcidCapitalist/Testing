@@ -322,7 +322,7 @@ data/           local DuckDB — gitignored                        [runtime only
 
 **Phase A complete ✅. Phase B complete ✅. Phase C complete ✅ (sample scope). Phase D is next.**
 
-319 tests green. `~/bin/uv run ruff check src tests scripts` passes.
+326 tests green. `~/bin/uv run ruff check src tests scripts` passes.
 
 Live smoke test — 2026-05-21: `uv run scanner run-daily --universe sample` completed.
 - Upgraded to EODHD €19.99 tier (100k calls, 30+ yr history).
