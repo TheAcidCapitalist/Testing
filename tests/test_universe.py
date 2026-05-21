@@ -131,11 +131,11 @@ class TestCandidatesGatedScopes:
         with pytest.raises(ProductionScopeUnavailable):
             candidates("global")
 
-    def test_paid_tier_message_references_spec(self):
-        with pytest.raises(ProductionScopeUnavailable, match="phase-c-plan"):
+    def test_production_scope_message_references_spec(self):
+        with pytest.raises(ProductionScopeUnavailable, match="decision #14"):
             candidates("us")
 
-    def test_paid_tier_required_is_exception_subclass(self):
+    def test_production_scope_unavailable_is_exception_subclass(self):
         assert issubclass(ProductionScopeUnavailable, Exception)
 
     def test_unknown_scope_raises_value_error(self):

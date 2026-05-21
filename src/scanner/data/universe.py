@@ -8,8 +8,8 @@ explicit stages so the loader never needs to drive ingestion:
     sector, region) for all tickers in the scope that pass the market-cap filter.
     For the 'sample' scope: metadata is embedded as constants (Option A from
     spec/phase-c-plan.md §7.1).  Zero API calls consumed.
-    For 'us' and 'global': raises PaidTierRequired — deferred until the
-    production metadata-source decision is made (open decision #14).
+    For 'us' and 'global': raises ProductionScopeUnavailable — deferred until the
+    metadata-source decision (#14) is implemented.
 
   Stage 2 — apply_post_ingest_filters(candidates, storage, ...)
     Filters the candidate list using data that only becomes available *after*
@@ -163,9 +163,8 @@ def candidates(
     For ``'sample'``: returns the curated list with embedded metadata,
     filtered by ``min_market_cap_usd``.  Zero API calls consumed.
 
-    For ``'us'`` and ``'global'``: raises :exc:`PaidTierRequired`.  These
-    scopes depend on a resolved metadata-source decision (open decision #14
-    in spec/phase-c-plan.md §7) and a paid API key — both are deferred.
+    For ``'us'`` and ``'global'``: raises :exc:`ProductionScopeUnavailable`.  These
+    scopes are deferred pending implementation of the metadata-source decision (#14).
 
     Returns a DataFrame with columns ``CANDIDATE_COLUMNS``:
     ticker, exchange, name, currency, market_cap_usd, sector, region.
@@ -179,9 +178,8 @@ def candidates(
         return df[df["market_cap_usd"] >= min_market_cap_usd].reset_index(drop=True)
     if scope in ("us", "global"):
         raise ProductionScopeUnavailable(
-            f"Scope '{scope}' is not yet available: the metadata-source strategy "
-            "has not been resolved (open decision #14 in spec/phase-c-plan.md).  "
-            "See §4 (sourcing options) and §7.1 (metadata strategy)."
+            "The 'us' and 'global' scopes are deferred pending implementation of "
+            "metadata-source decision #14 (yfinance)."
         )
     raise ValueError(
         f"Unknown scope '{scope}'.  Must be one of: sample, us, global."
