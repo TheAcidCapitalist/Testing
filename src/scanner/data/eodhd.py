@@ -105,7 +105,7 @@ class CallBudget:
         storage: Storage,
         run_id: str,
         *,
-        daily_limit: int = 20,
+        daily_limit: int = 5000,
     ) -> None:
         self._storage = storage
         self._run_id = run_id

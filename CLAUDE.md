@@ -325,21 +325,20 @@ data/           local DuckDB — gitignored                        [runtime only
 319 tests green. `~/bin/uv run ruff check src tests scripts` passes.
 
 Live smoke test — 2026-05-21: `uv run scanner run-daily --universe sample` completed.
+- Upgraded to EODHD €19.99 tier (100k calls, 30+ yr history).
+- Daily budget cap raised to 5000 (runaway protection).
 - 15/15 tickers fetched (0 failures, 0 budget exhausted). BRK-B.US accepted with dash.
-- 15 API calls of 20 daily budget used.
+- 15 API calls of 5000 daily budget used.
+- Full history fetched per ticker (ranging from ~3,500 to 16,000+ bars).
 - 15/15 post-ingest survivors. 11 indicators per ticker. 15 ranked rows. Status: `completed`.
-- Free-tier returns ~251 bars (≈1 year). Long-window indicators (Volatility/Volume 180-bar
-  percentile, MAV Diff Z-Score 228-bar warmup) degrade gracefully on one year of data.
-  All directions showed `neutral` on the smoke run — expected given 251-bar history
-  vs. indicators designed for 250+ bar windows.
+- Long-window indicators (Volatility/Volume 180-bar percentile, MAV Diff Z-Score 228-bar warmup)
+  now fully populated and operating on complete distributions.
 
 Phase C caveats (not defects):
 - `us`/`global` scopes deferred — `ProductionScopeUnavailable` guard in place, pending
   metadata-source decision (#14 in spec/phase-c-plan.md). At least one free option (yfinance)
   exists when decision is made.
 - Daily resolution only. Multi-timeframe is the deferred Phase C addendum.
-- `min_history_bars=250` post-ingest filter is tight against ~251 free-tier bars; large-cap
-  sample tickers all clear it comfortably.
 
 Next: **Phase D** — deploy + v1 agentic layer.
 - `src/scanner/report/excel.py` — ranked Excel workbook.

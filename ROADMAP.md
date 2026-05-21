@@ -136,9 +136,11 @@ mismatch is a data availability issue. The synthetic tests are the primary logic
 curated tickers and writes results to DuckDB.
 
 **Live smoke test — 2026-05-21:** `uv run scanner run-daily --universe sample` completed
-successfully. All 15 tickers fetched (0 failures, BRK-B.US accepted with dash), 15 API
-calls used of 20 daily budget, 15/15 post-ingest survivors, 11 indicators per ticker,
-15 ranked rows written. Status: `completed`.
+successfully. Upgraded to EODHD €19.99 tier (100k calls, 30+ yr history).
+Daily budget cap raised to 5000 (runaway protection).
+All 15 tickers fetched with full history (ranging from 3,500 to 16,000+ bars),
+15/15 post-ingest survivors, 11 indicators per ticker, 15 ranked rows written.
+Status: `completed`.
 
 **Prerequisite:** Phase B complete (all indicators green). Do not start data work
 until the math is validated — the build order exists so the math is verified before
@@ -171,18 +173,13 @@ Deliverables:
 **Phase C caveats (recorded, not defects):**
 - `us` and `global` scopes deferred — `ProductionScopeUnavailable` guard is in place
   pending open decision #14 (metadata-source strategy for market-cap filtering).
-- Free-tier EODHD returns ~251 bars (≈1 year) of history per ticker, not full history.
-  Long-window indicators (Volatility/Volume at 180-bar percentile, MAV Diff Z-Score at
-  228-bar warmup) operate with a partially-filled window on one year of data. This
-  produces valid but degraded output — expected behavior, not a defect. Full indicator
-  strength requires either a paid tier or accumulated daily runs.
 - Multi-timezone exchange close timing deferred to Phase D / Phase C addendum (MTF upgrade).
-- `min_history_bars=250` post-ingest filter is tight against ~251 free-tier bars; all 15
-  sample tickers passed on the live run (large-caps with long history).
 
 Deferred from Phase C:
 - `us`/`global` scopes — blocked on metadata-source decision (#14). At least one free option
   (yfinance) exists; resolution before Phase C addendum starts.
+- Bulk EOD fetch (`use_bulk_eod=True`) — deferred. Per-ticker is sufficient for sample
+  scope and currently handles 100k/day budget easily.
 - Multi-timezone exchange-close handling — v1 sample scope is US-only, no timezone issue.
 - MTF resampling and per-resolution storage — Phase C addendum (see below).
 

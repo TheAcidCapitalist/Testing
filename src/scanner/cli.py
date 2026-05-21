@@ -51,7 +51,7 @@ from scanner.scoring import normalize, score_tickers
 logger = logging.getLogger(__name__)
 
 _DEFAULT_DB = Path("data/scanner.duckdb")
-_DEFAULT_DAILY_LIMIT = 20
+_DEFAULT_DAILY_LIMIT = 5000
 
 
 # ---------------------------------------------------------------------------
@@ -86,7 +86,7 @@ def run_daily(
         Override today's date (for testing / backfill).  Defaults to
         ``date.today()``.
     daily_budget_limit:
-        Maximum EODHD API calls for this run.  Default 20 (free tier).
+        Maximum EODHD API calls for this run.  Default 5000 (runaway protection).
     output_path:
         If set, write the ranked results CSV to this path.  If ``None``,
         print the top-10 rows to stdout.
