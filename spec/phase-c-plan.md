@@ -904,7 +904,7 @@ build session that depends on them.
 | 11 | **`raw_value` storage strategy** — full `compute()` dict in JSON, or extracted scalar fields? | Full JSON: flexible, larger, opaque to SQL; extracted: queryable, requires schema migration per indicator change | **Resolved: full JSON dict.** Implemented in `storage.py` (34 tests green). |
 | 12 | **(Option B only) Specific sources and conflict resolution rule** | Core to the multi-source architecture; cannot build without this | Open — before any Option B code |
 | 13 | **(Option A/B only) Production backfill strategy** — how to acquire 2+ years of global history before Phase D launch | Phase E backtest needs sufficient history; cannot start E without it | Open — before Phase D |
-| 14 | **Metadata source strategy** — how to obtain market cap, sector, and region per ticker | Universe loader cannot apply `min_market_cap` or sector-grouping filters without this. See §7.1 for options. | Open — before Session 3 |
+| 14 | **Metadata source strategy** — how to obtain market cap, sector, and region per ticker | Universe loader cannot apply `min_market_cap` or sector-grouping filters without this. See §7.1 for options. | **Resolved: Option C (yfinance).** EODHD fundamentals not on €19.99 plan; yfinance is free and scalable for personal use. |
 
 ### 7.1 Metadata source strategy (decision #14)
 

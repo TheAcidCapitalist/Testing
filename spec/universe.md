@@ -43,9 +43,9 @@ configuration change — raise `daily_limit`, set `use_bulk_eod=True` in the cli
 provide a paid API key. No code rewrite. See `spec/phase-c-plan.md §4` for the
 full production sourcing decision.
 
-`yfinance` is acceptable for one-off metadata lookups during the test phase but not
-for the production OHLCV pipeline — it is rate-limited, unofficial, and unreliable
-at scale.
+For metadata (market cap, sector, region), `yfinance` is the designated source for
+the `us` and `global` scopes (resolved in decision #14). While not suitable for the
+high-volume OHLCV pipeline, it is an acceptable, free path for metadata lookups.
 
 Full probe findings are in `spec/eodhd-probe-notes.md`.
 
