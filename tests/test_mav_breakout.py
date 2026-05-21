@@ -21,9 +21,13 @@ DATA LIMITATION — why narrow_pct cannot match within 1e-3:
   purely a data availability issue.
 
   Consequence: breakout_flag and days_since depend on narrow_pct being correct at
-  every historical bar, so they also cannot be matched exactly. Those fixture
-  assertions are marked xfail with a reason. The SYNTHETIC tests are the primary
-  validation of the four-condition firing logic.
+  every historical bar. Without the full history, spurious narrow conditions trigger
+  early. Furthermore, investigation of the original 2012 spreadsheet revealed a
+  data corruption issue in the GBP panel: the Breakout flag cell was manually overwritten
+  with the literal value '14' (flags must be -1, 0, or 1). Because the fixture cannot
+  reproduce flags on truncated history and the ground truth sheet contains corrupted
+  data, the fixture-based flag/days tests have been retired. The SYNTHETIC tests are
+  the exclusive validation of the four-condition firing logic.
 
 Reduced params for synthetic tests (mav1=3, mav2=5, mav3=8, k_window=5,
 percentile_window=10, narrow_threshold=0.4) to keep warmup short.
@@ -102,49 +106,6 @@ def test_fixture_narrow_pct(ticker: str) -> None:
         f"(tolerance {NARROW_PCT_TOL}; see DATA LIMITATION in module docstring)"
     )
 
-
-_DATA_LIMIT_REASON = (
-    "breakout_flag and days_since depend on narrow_pct being correct at every "
-    "historical bar, which requires the original full Bloomberg data history "
-    "(years, not just 287 bars). Without that history the 250-bar percentile "
-    "window is partially populated, causing spurious narrow conditions at early "
-    "bars. The firing logic is validated by the synthetic tests instead."
-)
-
-
-@pytest.mark.xfail(strict=False, reason=_DATA_LIMIT_REASON)
-@pytest.mark.parametrize("ticker", ["WTI", "GOLD", "EUR", "JPY"])
-def test_fixture_no_breakout_tickers(ticker: str) -> None:
-    """WTI, GOLD, EUR, JPY must have breakout_flag=0 and days_since_breakout=0."""
-    df = _load_tsc(ticker)
-    expected = pd.read_csv(TSC_DIR / "expected_indicators.csv")
-    row = expected[expected["short_name"] == ticker].iloc[0]
-
-    result = mod.compute(df)
-
-    assert result["breakout_flag"] == int(row["mav_breakout_flag"]), (
-        f"{ticker}: breakout_flag {result['breakout_flag']} vs expected {int(row['mav_breakout_flag'])}"
-    )
-    assert result["days_since_breakout"] == int(row["mav_days_since"]), (
-        f"{ticker}: days_since_breakout {result['days_since_breakout']} vs expected {int(row['mav_days_since'])}"
-    )
-
-
-@pytest.mark.xfail(strict=False, reason=_DATA_LIMIT_REASON)
-def test_fixture_gbp_breakout() -> None:
-    """GBP must reproduce mav_breakout_flag=14 and mav_days_since=20."""
-    df = _load_tsc("GBP")
-    expected = pd.read_csv(TSC_DIR / "expected_indicators.csv")
-    row = expected[expected["short_name"] == "GBP"].iloc[0]
-
-    result = mod.compute(df)
-
-    assert result["breakout_flag"] == int(row["mav_breakout_flag"]), (
-        f"GBP breakout_flag {result['breakout_flag']} vs expected {int(row['mav_breakout_flag'])}"
-    )
-    assert result["days_since_breakout"] == int(row["mav_days_since"]), (
-        f"GBP days_since_breakout {result['days_since_breakout']} vs expected {int(row['mav_days_since'])}"
-    )
 
 
 # ---------------------------------------------------------------------------

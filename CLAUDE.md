@@ -322,8 +322,7 @@ data/           local DuckDB — gitignored                        [runtime only
 
 **Phase A complete ✅. Phase B complete ✅. Phase C complete ✅ (sample scope). Phase D is next.**
 
-319 tests green, 5 xfailed (`test_mav_breakout.py` — data-limitation xfails; see CLAUDE.md §Phase B).
-`~/bin/uv run ruff check src tests scripts` passes.
+319 tests green. `~/bin/uv run ruff check src tests scripts` passes.
 
 Live smoke test — 2026-05-21: `uv run scanner run-daily --universe sample` completed.
 - 15/15 tickers fetched (0 failures, 0 budget exhausted). BRK-B.US accepted with dash.

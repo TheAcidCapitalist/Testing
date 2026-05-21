@@ -93,7 +93,7 @@ Deliverables:
 
 After all 12 indicator modules are green (8 trade + 3 confirmation + scoring):
 - [x] Wire `scoring.py` — normalize, combo score, ranking (per `spec/scoring.md`)
-- [x] Verify full suite passes: `uv run pytest` — 319 passed, 5 xfailed (all xfails in `test_mav_breakout.py`; see note below)
+- [x] Verify full suite passes: `uv run pytest` — 319 passed
 
 #### Easy indicators (fixture-validated)
 
@@ -433,7 +433,7 @@ fixtures (`pct_duration_threshold.csv`, `vol_expansion_trigger.csv`,
 | Phase | Status | Tests |
 |-------|--------|-------|
 | A — Scaffold | ✅ complete | 0 (plumbing) |
-| B — Indicators + scoring | ✅ complete | 319 passed, 5 xfailed |
+| B — Indicators + scoring | ✅ complete | 319 passed |
 | C — Data pipeline | ✅ complete (sample scope) | 160 |
 | D — Deploy + v1 agent | ⬜ next | — |
 | E — Backtest | ⬜ not started | — |
