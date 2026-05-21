@@ -248,7 +248,7 @@ class TestBudgetEnforcement:
         assert storage.get_api_calls_used(_RUN_ID) == 1
 
     def test_counter_incremented_on_404(self, storage):
-        """Budget is charged before the HTTP call — a 404 still costs one call."""
+        """Budget is charged for a 404 since the server processed it (billable)."""
         b = CallBudget(storage, _RUN_ID, daily_limit=_DAILY_LIMIT)
         c = EODHDClient(b, api_key="testkey")
 
@@ -257,6 +257,25 @@ class TestBudgetEnforcement:
                 c.fetch_eod("AAPL.US")
 
         assert storage.get_api_calls_used(_RUN_ID) == 1
+
+    @pytest.mark.parametrize("status_code, expected_exc", [
+        (401, EODHDAuthError),
+        (403, EODHDForbiddenError),
+        (423, EODHDForbiddenError),
+        (429, EODHDThrottleError),
+        (500, EODHDServerError),
+        (503, EODHDServerError),
+    ])
+    def test_counter_not_incremented_on_unbilled_errors(self, storage, status_code, expected_exc):
+        """Budget is NOT charged for auth, permission, throttle, or server faults."""
+        b = CallBudget(storage, _RUN_ID, daily_limit=_DAILY_LIMIT)
+        c = EODHDClient(b, api_key="testkey")
+
+        with patch("httpx.get", return_value=_err(status_code)):
+            with pytest.raises(expected_exc):
+                c.fetch_eod("AAPL.US")
+
+        assert storage.get_api_calls_used(_RUN_ID) == 0
 
     def test_budget_state_persists_across_reinit(self, storage):
         """A new CallBudget for the same run_id picks up the previous count."""
@@ -325,10 +344,15 @@ class TestErrorResponses:
             with pytest.raises(EODHDNotFoundError):
                 client.fetch_eod("AAPL.US")
 
-    def test_network_error_raises_eodhd_error(self, client):
+    def test_network_error_raises_eodhd_error(self, storage):
+        b = CallBudget(storage, _RUN_ID, daily_limit=_DAILY_LIMIT)
+        c = EODHDClient(b, api_key="testkey")
+
         with patch("httpx.get", side_effect=httpx.ConnectError("connection refused")):
             with pytest.raises(EODHDError):
-                client.fetch_eod("AAPL.US")
+                c.fetch_eod("AAPL.US")
+
+        assert storage.get_api_calls_used(_RUN_ID) == 0
 
     def test_error_types_are_eodhd_error_subclasses(self):
         assert issubclass(DailyBudgetExceeded, EODHDError)

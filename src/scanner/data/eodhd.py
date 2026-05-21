@@ -115,6 +115,17 @@ class CallBudget:
 
     # ── Public interface ──────────────────────────────────────────────────────
 
+    def check(self, n: int = 1) -> None:
+        """Verify budget is available without reserving it.
+
+        Raises :exc:`DailyBudgetExceeded` if the budget would be exceeded.
+        """
+        if self._used + n > self._daily_limit:
+            raise DailyBudgetExceeded(
+                f"Daily API call budget of {self._daily_limit} would be exceeded "
+                f"({self._used} used, {n} requested)."
+            )
+
     def charge(self, n: int = 1) -> None:
         """Reserve *n* calls from the daily budget.
 
@@ -123,11 +134,7 @@ class CallBudget:
         modifying the counter.  On success the counter is incremented in memory
         and persisted to storage immediately.
         """
-        if self._used + n > self._daily_limit:
-            raise DailyBudgetExceeded(
-                f"Daily API call budget of {self._daily_limit} would be exceeded "
-                f"({self._used} used, {n} requested)."
-            )
+        self.check(n)
         self._used += n
         self._storage.update_api_calls_used(self._run_id, self._used)
 
@@ -247,7 +254,7 @@ class EODHDClient:
 
         # ── Budget check is BEFORE the HTTP call ─────────────────────────────
         # If this raises, the HTTP request is never issued.
-        self._budget.charge(1)
+        self._budget.check(1)
 
         params: dict[str, str] = {
             "api_token": self._api_key,
@@ -264,6 +271,10 @@ class EODHDClient:
             response = httpx.get(url, params=params, timeout=30)
         except httpx.RequestError as exc:
             raise EODHDError(f"Network error fetching '{ticker}': {exc}") from exc
+
+        # Only charge budget for calls EODHD actually bills (2xx and 404).
+        if response.status_code in (200, 404):
+            self._budget.charge(1)
 
         self._handle_status(response, ticker)
 
