@@ -369,3 +369,12 @@ From `spec/phase-c-plan.md` §7:
 
 5. **`x-ratelimit-remaining` is not a reliable daily-quota tracker.** Do not use it to
    gate the daily run. Maintain the daily call count in `tbl_run_log` instead.
+
+### Probe 3: Non-US coverage on €19.99 tier (2026-05-21)
+**Goal:** Confirm the €19.99 EOD plan serves non-US EOD data.
+**Target:** `VOD.LSE` (Vodafone Group Plc, London Stock Exchange)
+**Request:** `GET https://eodhd.com/api/eod/VOD.LSE?api_token={KEY}&period=d&fmt=json`
+**Result:** HTTP 200 OK
+- **Bars returned:** 9634 bars (history from 1988-10-25).
+- **Shape:** Identical to the US shape: `{'date': '1988-10-25', 'open': 96.68, 'high': 96.68, 'low': 96.68, 'close': 96.68, 'adjusted_close': 2.0994, 'volume': 0}`.
+**Conclusion:** The €19.99 plan correctly supports global exchanges. The exact same client logic used for `.US` works for `.LSE`. The `global` scope is confirmed feasible.
