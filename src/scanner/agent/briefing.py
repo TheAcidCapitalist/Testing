@@ -23,8 +23,8 @@ log = logging.getLogger(__name__)
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
-DEFAULT_MODEL = "claude-haiku-4-5-20251001"
-"""Haiku model identifier.  Override via the ``model`` parameter."""
+DEFAULT_MODEL = "gpt-4o-mini"
+"""OpenAI model identifier.  Override via the ``model`` parameter."""
 
 MAX_TOKENS = 1024
 """Maximum tokens for the briefing response."""
@@ -43,10 +43,10 @@ def generate_briefing(
     data:
         The dict returned by ``build_dashboard_dict()``.
     client:
-        An ``anthropic.Anthropic`` instance.  When ``None``, a real client
-        is built from the ``ANTHROPIC_API_KEY`` environment variable.
+        An ``openai.OpenAI`` instance.  When ``None``, a real client
+        is built from the ``OPENAI_API_KEY`` environment variable.
     model:
-        The Anthropic model to use (default: :data:`DEFAULT_MODEL`).
+        The OpenAI model to use (default: :data:`DEFAULT_MODEL`).
 
     Returns
     -------
@@ -71,15 +71,15 @@ def _generate(
 ) -> str | None:
     """Core generation logic — allowed to raise; caller wraps in try/except."""
     # Lazy import so the SDK is only loaded when actually generating.
-    import anthropic  # noqa: F811
+    import openai  # noqa: F811
 
     # Build or validate the client
     if client is None:
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        api_key = os.environ.get("OPENAI_API_KEY")
         if not api_key:
-            log.warning("ANTHROPIC_API_KEY not set — skipping briefing")
+            log.warning("OPENAI_API_KEY not set — skipping briefing")
             return None
-        client = anthropic.Anthropic(api_key=api_key)
+        client = openai.OpenAI(api_key=api_key)
 
     # ── Prepare the prompt payload ───────────────────────────────────────
     payload = _build_payload(data)
@@ -108,11 +108,13 @@ def _generate(
         - If the scan is empty (0 tickers scored), say so in one sentence.
     """)
 
-    response = client.messages.create(
+    response = client.chat.completions.create(
         model=model,
         max_tokens=MAX_TOKENS,
-        system=system_prompt,
-        messages=[{"role": "user", "content": payload}],
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": payload}
+        ],
     )
 
     # Extract text from the response
@@ -179,13 +181,12 @@ def _slim_ticker(t: dict) -> dict:
 
 
 def _extract_text(response: object) -> str | None:
-    """Pull plain text from an Anthropic Messages response."""
+    """Pull plain text from an OpenAI ChatCompletion response."""
     try:
-        for block in response.content:
-            if getattr(block, "type", None) == "text":
-                text = block.text.strip()
-                if text:
-                    return text
-    except (AttributeError, TypeError):
+        if response.choices and response.choices[0].message.content:
+            text = response.choices[0].message.content.strip()
+            if text:
+                return text
+    except (AttributeError, TypeError, IndexError):
         pass
     return None

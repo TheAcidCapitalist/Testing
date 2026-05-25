@@ -308,9 +308,9 @@ confidently-wrong formula on the first run.
     `str | None`. Consumes only the canonical dashboard dict (JSON-only, no DuckDB).
     Fail-soft: never raises; logs and returns `None` on any failure (missing key, network
     error, empty response). Ships only envelope + non-neutral tickers to the model.
-    Injectable Anthropic client for testing; builds a real one from `ANTHROPIC_API_KEY`
-    when none is passed. Model configurable (default: `claude-haiku-4-20250414`).
-    Anthropic SDK added as a real dependency.
+  - Injectable OpenAI client for testing; builds a real one from `OPENAI_API_KEY`
+    when none is passed. Model configurable (default: `gpt-4o-mini`).
+  - OpenAI SDK added as a real dependency.
   - `tests/test_briefing.py` — 14 tests. All mock the client (never hit live API). Covers:
     happy-path returns model text, non-neutral-only payload, missing API key → None,
     network/API error → None, malformed/empty response → None, empty-run dict handled,

@@ -39,7 +39,7 @@ from scanner.scoring import normalize, score_tickers
 
 @pytest.fixture(autouse=True)
 def mock_generate_briefing():
-    """Ensure no test in this file hits the live Anthropic API."""
+    """Ensure no test in this file hits the live OpenAI API."""
     with patch("scanner.cli.generate_briefing", return_value="Mocked briefing") as m:
         yield m
 

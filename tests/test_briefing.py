@@ -1,6 +1,6 @@
 """Tests for src/scanner/agent/briefing.py.
 
-All tests mock the Anthropic client — the live API is never hit.
+All tests mock the OpenAI client — the live API is never hit.
 Assertions are structural (return type, fail-soft behaviour), not on
 generated wording.
 """
@@ -83,11 +83,12 @@ def _empty_dict() -> dict:
 
 
 def _mock_client(response_text: str = "Today's scan summary.") -> MagicMock:
-    """Build a mock Anthropic client that returns a canned text response."""
-    text_block = SimpleNamespace(type="text", text=response_text)
-    response = SimpleNamespace(content=[text_block])
+    """Build a mock OpenAI client that returns a canned text response."""
+    message = SimpleNamespace(content=response_text)
+    choice = SimpleNamespace(message=message)
+    response = SimpleNamespace(choices=[choice])
     client = MagicMock()
-    client.messages.create.return_value = response
+    client.chat.completions.create.return_value = response
     return client
 
 
@@ -103,7 +104,7 @@ class TestHappyPath:
     def test_client_called_with_model(self) -> None:
         client = _mock_client()
         generate_briefing(_sample_dict(), client=client, model="custom-model")
-        call_kwargs = client.messages.create.call_args
+        call_kwargs = client.chat.completions.create.call_args
         assert call_kwargs.kwargs["model"] == "custom-model"
 
     def test_non_neutral_only_in_payload(self) -> None:
@@ -111,7 +112,8 @@ class TestHappyPath:
         client = _mock_client()
         data = _sample_dict(3)  # TK0=buy, TK1=sell, TK2=neutral
         generate_briefing(data, client=client)
-        user_msg = client.messages.create.call_args.kwargs["messages"][0]["content"]
+        messages = client.chat.completions.create.call_args.kwargs["messages"]
+        user_msg = next(m["content"] for m in messages if m["role"] == "user")
         assert "TK0" in user_msg
         assert "TK1" in user_msg
         assert "TK2" not in user_msg
@@ -119,11 +121,11 @@ class TestHappyPath:
 
 class TestMissingApiKey:
     def test_no_key_returns_none(self) -> None:
-        """When no client is passed and ANTHROPIC_API_KEY is unset, returns None."""
+        """When no client is passed and OPENAI_API_KEY is unset, returns None."""
         with patch.dict("os.environ", {}, clear=True):
             # Also remove the key if it exists in the real env
             import os
-            env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
+            env = {k: v for k, v in os.environ.items() if k != "OPENAI_API_KEY"}
             with patch.dict("os.environ", env, clear=True):
                 result = generate_briefing(_sample_dict())
                 assert result is None
@@ -132,29 +134,29 @@ class TestMissingApiKey:
 class TestClientRaises:
     def test_network_error_returns_none(self) -> None:
         client = MagicMock()
-        client.messages.create.side_effect = ConnectionError("network down")
+        client.chat.completions.create.side_effect = ConnectionError("network down")
         result = generate_briefing(_sample_dict(), client=client)
         assert result is None
 
     def test_api_error_returns_none(self) -> None:
         client = MagicMock()
-        client.messages.create.side_effect = RuntimeError("API overloaded")
+        client.chat.completions.create.side_effect = RuntimeError("API overloaded")
         result = generate_briefing(_sample_dict(), client=client)
         assert result is None
 
     def test_malformed_response_returns_none(self) -> None:
         """Response with no text blocks returns None."""
-        response = SimpleNamespace(content=[])
+        response = SimpleNamespace(choices=[])
         client = MagicMock()
-        client.messages.create.return_value = response
+        client.chat.completions.create.return_value = response
         result = generate_briefing(_sample_dict(), client=client)
         assert result is None
 
     def test_none_content_returns_none(self) -> None:
         """Response with None content attribute returns None."""
-        response = SimpleNamespace(content=None)
+        response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=None))])
         client = MagicMock()
-        client.messages.create.return_value = response
+        client.chat.completions.create.return_value = response
         result = generate_briefing(_sample_dict(), client=client)
         assert result is None
 
@@ -168,7 +170,7 @@ class TestEmptyRun:
     def test_empty_dict_client_still_called(self) -> None:
         client = _mock_client()
         generate_briefing(_empty_dict(), client=client)
-        assert client.messages.create.called
+        assert client.chat.completions.create.called
 
 
 class TestMalformedInput:
