@@ -2,26 +2,25 @@ name: Daily Scan
 
 on:
   schedule:
-    # 06:00 ET = 10:00 UTC (standard time) / 11:00 UTC (daylight saving)
-    # Run at both to stay safe; the scanner is idempotent for a given date.
-    - cron: "0 10 * * 1-5"
-    - cron: "0 11 * * 1-5"
-  workflow_dispatch:          # ← allow manual trigger from Actions UI
-    inputs:
-      dry_run:
-        description: "Skip email & Excel (dry run)"
-        required: false
-        default: "false"
-        type: boolean
+    # 08:00 UTC = 04:00 EDT (summer) / 03:00 EST (winter)
+    # GitHub Actions cron operates in UTC and does not track US DST drift (±1h).
+    - cron: "0 8 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
 
 jobs:
-  scan:
-    name: Run signal scan
+  scan-and-deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Install uv
@@ -37,30 +36,67 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen
 
-      - name: Run scan
+      - name: Restore DuckDB cache
+        id: cache-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: data/scanner.duckdb
+          key: duckdb-${{ github.run_id }}
+          restore-keys: |
+            duckdb-
+
+      - name: Warn on cache miss
+        if: steps.cache-restore.outputs.cache-hit != 'true' && github.run_number > 1
+        run: |
+          echo "::warning title=Missing Database Cache::DuckDB cache missed on run ${GITHUB_RUN_NUMBER}. Previous price history and metadata have been lost! Starting fresh."
+
+      - name: Healthcheck Start Ping
+        if: env.HEALTHCHECK_URL != ''
+        run: curl -fsS -m 10 --retry 5 -o /dev/null "$HEALTHCHECK_URL/start" || true
+        env:
+          HEALTHCHECK_URL: ${{ secrets.HEALTHCHECK_URL }}
+
+      - name: Run Signal Scanner
+        id: run-scanner
         env:
           EODHD_API_KEY: ${{ secrets.EODHD_API_KEY }}
-          SMTP_HOST: ${{ secrets.SMTP_HOST }}
-          SMTP_PORT: ${{ secrets.SMTP_PORT }}
-          SMTP_USER: ${{ secrets.SMTP_USER }}
-          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           REPORT_RECIPIENTS: ${{ secrets.REPORT_RECIPIENTS }}
-          UNIVERSE: ${{ vars.UNIVERSE || 'US' }}
-          MIN_MARKET_CAP_M: ${{ vars.MIN_MARKET_CAP_M || '500' }}
-          LOG_LEVEL: INFO
+          REPORT_FROM_ADDR: ${{ secrets.REPORT_FROM_ADDR }}
         run: |
-          DRY_FLAG=""
-          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
-            DRY_FLAG="--dry-run"
-          fi
-          uv run scanner scan $DRY_FLAG
+          uv run scanner run-daily --universe us --send-email --report-dir=data/reports
 
-      - name: Upload report artifact
+      - name: Save DuckDB cache
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/cache/save@v4
         with:
-          name: signal-report-${{ github.run_id }}
-          path: |
-            data/latest.json
-            data/*.xlsx
-          retention-days: 30
+          path: data/scanner.duckdb
+          key: duckdb-${{ github.run_id }}
+
+      - name: Prepare Dashboard Data
+        run: |
+          mkdir -p dashboard
+          # The run_id is output by the Python script to GITHUB_OUTPUT
+          cp "data/reports/${{ steps.run-scanner.outputs.run_id }}_dashboard.json" dashboard/latest.json
+
+      - name: Upload Pages Artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dashboard/
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+      - name: Delivery monitoring - Healthchecks Success
+        if: success() && steps.run-scanner.outputs.email_sent == 'true' && env.HEALTHCHECK_URL != ''
+        run: curl -fsS -m 10 --retry 5 -o /dev/null "$HEALTHCHECK_URL" || true
+        env:
+          HEALTHCHECK_URL: ${{ secrets.HEALTHCHECK_URL }}
+
+      - name: Delivery monitoring - Healthchecks Failure
+        if: always() && steps.run-scanner.outputs.email_sent != 'true' && env.HEALTHCHECK_URL != ''
+        run: curl -fsS -m 10 --retry 5 -o /dev/null "$HEALTHCHECK_URL/fail" || true
+        env:
+          HEALTHCHECK_URL: ${{ secrets.HEALTHCHECK_URL }}

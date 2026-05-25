@@ -96,7 +96,7 @@ _W_AGREE = 0.40
 _W_MAGNITUDE = 0.30
 _W_CONFIRM = 0.20
 _W_STALENESS = 0.10
-_W_MTF = 0.0  # multi-timeframe: not active in v1 daily-only runs
+_W_MTF = 0.10  # provisional MTF alignment bonus
 
 
 # ---------------------------------------------------------------------------
@@ -228,6 +228,8 @@ def score_tickers(
             "agreement_count", "n_trade_indicators",
             "signals_firing", "vol_confirmation", "volume_confirmation",
             "days_since_breakout",
+            "resolutions_available", "resolutions_aligned",
+            "alignment_fraction",
         ])
 
     df = pd.DataFrame(rows)
@@ -319,6 +321,25 @@ def _score_one(
 
     days_since_breakout: int | None = min(dsb_list) if dsb_list else None
 
+    # ── Alignment Promotion (Stage 4 MTF) ──────────────────────────────────
+    # Daily BB is excluded — it already drives combo_score and agreement_count.
+    # The alignment term measures only weekly/monthly cross-timeframe confirmation.
+    # Rule B: both must be present (≥2 gate on a 2-element list).
+    mtf_term = 0.0
+    n_resolutions = 0
+    resolutions_aligned = 0
+    if direction != "neutral":
+        mtf_keys = ["box_breakout_weekly", "box_breakout_monthly"]
+
+        for key in mtf_keys:
+            if key in outputs:
+                n_resolutions += 1
+                if outputs[key].get("direction") == direction:
+                    resolutions_aligned += 1
+
+        if n_resolutions >= 2:
+            mtf_term = resolutions_aligned / n_resolutions
+
     # ── Rank score ─────────────────────────────────────────────────────────
     agree_term = (agreement_count / n_trade) if n_trade > 0 else 0.0
     magnitude_term = abs(combo_score - 0.5) * 2.0
@@ -331,7 +352,7 @@ def _score_one(
         + _W_MAGNITUDE * magnitude_term
         + _W_CONFIRM * confirmation_mult
         - _W_STALENESS * staleness_term
-        # _W_MTF * 0.0 — omitted (v1 daily-only)
+        + _W_MTF * mtf_term
     )
 
     return {
@@ -348,4 +369,7 @@ def _score_one(
         "vol_confirmation":     vol_state,
         "volume_confirmation":  volume_state,
         "days_since_breakout":  days_since_breakout,
+        "resolutions_available": n_resolutions,
+        "resolutions_aligned":  resolutions_aligned,
+        "alignment_fraction":   mtf_term,
     }

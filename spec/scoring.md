@@ -118,13 +118,13 @@ ranked output augments it with four factors:
    most recent breakout"). Use `days_since_breakout`.
 5. **Multi-timeframe alignment** — a ticker where the same indicator (or combination)
    fires in the same direction on multiple bar resolutions simultaneously has higher
-   conviction than a single-resolution fire. Per `spec/multi-timeframe.md`: daily +
+   conviction than a single-resolution fire. Per `spec/box-breakout-mt.md`: daily +
    weekly + monthly alignment is the highest-conviction setup. The `mtf_alignment_score`
    encodes how many resolutions agree. This factor is only active when the multi-
    timeframe scan modes are running; single-resolution (v1 daily-only) runs have
    `mtf_alignment_score = 0.0` and `w_mtf` is zeroed.
 
-   **⚠ Open question #7 — Alignment scoring shape:** See `spec/multi-timeframe.md`
+   **⚠ OPEN[#7] — Alignment scoring shape:** See `spec/box-breakout-mt.md`
    for the full set of options (additive, multiplicative, hard-tier, bonus-only-at-2).
    **Resolution pending user decision.** Placeholder: additive option (A), `w_mtf`
    tuned in Phase E.
@@ -183,7 +183,7 @@ The v1 daily-only schema uses `resolution='daily'` as the implicit value. The co
 is added in the Phase C MTF addendum with `DEFAULT 'daily'` for backward
 compatibility with existing v1 rows. The `mtf_alignment_score` is computed by
 querying across `resolution` values for the same `(ticker, exchange, date, indicator_name)`.
-See `spec/multi-timeframe.md §Per-resolution storage` for the full schema change.
+See `spec/box-breakout-mt.md §Per-resolution storage` for the full schema change.
 
 ## What the scoring layer must NOT do
 

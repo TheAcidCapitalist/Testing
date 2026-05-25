@@ -1,0 +1,114 @@
+{
+  "meta": {
+    "schema_version": "1.0",
+    "run_date": "2026-05-24",
+    "generated_at": "2026-05-24T10:45:00Z",
+    "scope": "sample",
+    "combination_name": "default",
+    "n_tickers_scored": 3,
+    "n_tickers_universe": 500,
+    "n_buy": 1,
+    "n_sell": 1,
+    "n_neutral": 1
+  },
+  "tickers": [
+    {
+      "ticker": "AAPL",
+      "exchange": "US",
+      "date": "2026-05-24",
+      "direction": "buy",
+      "combo_score": 0.85,
+      "rank_score": 0.92,
+      "agreement_count": 4,
+      "n_trade_indicators": 5,
+      "signals_firing": ["rsi", "macd", "box_breakout"],
+      "vol_confirmation": "confirm",
+      "volume_confirmation": "confirm",
+      "days_since_breakout": 2,
+      "meta": {
+        "name": "Apple Inc.",
+        "currency": "USD",
+        "market_cap_usd": 3000000000000.0,
+        "sector": "Technology",
+        "region": "North America"
+      },
+      "mtf_alignment": {
+        "resolutions_available": 2,
+        "resolutions_aligned": 2,
+        "alignment_fraction": 1.0
+      },
+      "indicators": {
+        "rsi": {
+          "raw_value": {"signal_value": 0.8, "rsi": 30.2},
+          "normalized_value": 0.8,
+          "direction": "buy"
+        }
+      }
+    },
+    {
+      "ticker": "MSFT",
+      "exchange": "US",
+      "date": "2026-05-24",
+      "direction": "sell",
+      "combo_score": 0.15,
+      "rank_score": 0.88,
+      "agreement_count": 4,
+      "n_trade_indicators": 5,
+      "signals_firing": ["rsi", "box_breakout"],
+      "vol_confirmation": "reject",
+      "volume_confirmation": "neutral",
+      "days_since_breakout": null,
+      "meta": {
+        "name": "Microsoft Corp.",
+        "currency": "USD",
+        "market_cap_usd": 2800000000000.0,
+        "sector": "Technology",
+        "region": "North America"
+      },
+      "mtf_alignment": {
+        "resolutions_available": 2,
+        "resolutions_aligned": 0,
+        "alignment_fraction": 0.0
+      },
+      "indicators": {
+        "rsi": {
+          "raw_value": {"signal_value": 0.2, "rsi": 75.2},
+          "normalized_value": 0.2,
+          "direction": "sell"
+        }
+      }
+    },
+    {
+      "ticker": "GOOGL",
+      "exchange": "US",
+      "date": "2026-05-24",
+      "direction": "neutral",
+      "combo_score": 0.55,
+      "rank_score": 0.40,
+      "agreement_count": 2,
+      "n_trade_indicators": 5,
+      "signals_firing": ["macd"],
+      "vol_confirmation": "neutral",
+      "volume_confirmation": "neutral",
+      "days_since_breakout": 5,
+      "meta": {
+        "name": "Alphabet Inc.",
+        "currency": "USD",
+        "market_cap_usd": 1800000000000.0,
+        "sector": "Communication Services",
+        "region": "North America"
+      },
+      "mtf_alignment": {
+        "resolutions_available": 1,
+        "resolutions_aligned": 0,
+        "alignment_fraction": 0.0
+      },
+      "indicators": {
+        "rsi": {
+          "normalized_value": 0.5,
+          "direction": "neutral"
+        }
+      }
+    }
+  ]
+}

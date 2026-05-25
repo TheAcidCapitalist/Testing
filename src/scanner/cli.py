@@ -30,12 +30,14 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from datetime import date
 from pathlib import Path
 
 import pandas as pd
 
+from scanner.agent.briefing import generate_briefing
 from scanner.data.eodhd import (
     CallBudget,
     DailyBudgetExceeded,
@@ -46,6 +48,9 @@ from scanner.data.eodhd import (
 from scanner.data.storage import Storage
 from scanner.data.universe import apply_post_ingest_filters, candidates
 from scanner.indicators import REGISTRY
+from scanner.report.dashboard_json import build_dashboard_dict, write_dashboard_json
+from scanner.report.email import SendError, send_report
+from scanner.report.excel import write_excel
 from scanner.scoring import normalize, score_tickers
 
 logger = logging.getLogger(__name__)
@@ -58,6 +63,136 @@ _DEFAULT_DAILY_LIMIT = 5000
 # Orchestrator
 # ---------------------------------------------------------------------------
 
+def resample_ohlcv(df: pd.DataFrame, freq: str) -> pd.DataFrame:
+    """Resample daily OHLCV to higher timeframe and drop trailing incomplete period."""
+    if df.empty:
+        return df
+    
+    _df = df.sort_values("date").copy()
+    last_orig_date = pd.Timestamp(_df["date"].max()).date()
+    
+    _df.set_index("date", inplace=True)
+    resampled = _df.resample(freq).agg({
+        "open": "first",
+        "high": "max",
+        "low": "min",
+        "close": "last",
+        "volume": "sum",
+        "adj_close": "last",
+        "source": "last",
+    }).dropna(subset=["close"])
+    
+    if resampled.empty:
+        return resampled.reset_index()
+    
+    # Drop trailing incomplete period
+    if last_orig_date < resampled.index[-1].date():
+        resampled = resampled.iloc[:-1]
+        
+    return resampled.reset_index()
+
+BOX_BREAKOUT_MODES = [
+    {
+        "resolution": "daily",
+        "freq": None,
+        "params": {
+            "lookback": 60,
+            "touch_tolerance": 0.05, # 5% for short 60d bases
+            "compression_threshold": 5.0, # Range-to-ATR (window level)
+            "duration_pct": 0.70,
+        }
+    },
+    {
+        "resolution": "weekly",
+        "freq": "W-FRI",
+        "params": {
+            "lookback": 104,
+            "touch_tolerance": 0.15, # 15% for medium 2y bases
+            "compression_threshold": 6.0,
+            "duration_pct": 0.70,
+        }
+    },
+    {
+        "resolution": "monthly",
+        "freq": "ME",
+        "params": {
+            "lookback": 240,
+            "touch_tolerance": 0.30, # 30% for massive 20y bases
+            "compression_threshold": 8.0,
+            "duration_pct": 0.50, # 20-year flat lines are impossible in equities; allow 50% congestion
+        }
+    }
+]
+
+
+def run_report_pipeline(
+    storage: Storage,
+    run_id: str,
+    effective_date: date,
+    scope: str,
+    output_dir: Path,
+    send_email: bool = False,
+    recipients: list[str] | None = None,
+    from_addr: str | None = None,
+    dashboard_url: str | None = None,
+    email_transport: object | None = None,
+) -> dict:
+    """Generate and dispatch the daily report suite (JSON, Excel, AI briefing, Email)."""
+    logger.info("Starting report pipeline for run '%s'.", run_id)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    dict_data = build_dashboard_dict(storage, effective_date, scope, "default")
+    
+    json_path = output_dir / f"{run_id}_dashboard.json"
+    write_dashboard_json(dict_data, json_path)
+    logger.info("Wrote dashboard JSON to %s", json_path)
+    
+    excel_path = output_dir / f"{run_id}_report.xlsx"
+    write_excel(dict_data, excel_path)
+    logger.info("Wrote Excel report to %s", excel_path)
+    
+    briefing = generate_briefing(dict_data)
+    briefing_generated = briefing is not None
+    if not briefing_generated:
+        logger.warning("AI briefing generation failed or returned None (fail-soft).")
+    else:
+        logger.info("AI briefing generated successfully.")
+        
+    email_sent = False
+    if send_email:
+        try:
+            kwargs = {
+                "briefing": briefing,
+                "excel_path": excel_path,
+            }
+            if recipients:
+                kwargs["recipients"] = recipients
+            if from_addr:
+                kwargs["from_addr"] = from_addr
+            if dashboard_url:
+                kwargs["dashboard_url"] = dashboard_url
+            if email_transport:
+                kwargs["transport"] = email_transport
+            
+            send_report(**kwargs)
+            email_sent = True
+            logger.info("Report email sent successfully.")
+        except SendError as exc:
+            logger.error("Failed to send report email: %s", exc)
+        except Exception as exc:
+            logger.error("Unexpected error sending report email: %s", exc)
+    else:
+        logger.info("send_email=False — skipping email dispatch.")
+        
+    storage.log_run_report_status(run_id, briefing_generated, email_sent)
+    
+    return {
+        "json_path": json_path,
+        "excel_path": excel_path,
+        "briefing_generated": briefing_generated,
+        "email_sent": email_sent,
+    }
+
 
 def run_daily(
     scope: str = "sample",
@@ -68,6 +203,12 @@ def run_daily(
     daily_budget_limit: int = _DEFAULT_DAILY_LIMIT,
     output_path: str | None = None,
     backfill: bool = False,
+    report_dir: str | Path | None = None,
+    send_email: bool = False,
+    recipients: list[str] | None = None,
+    from_addr: str | None = None,
+    dashboard_url: str | None = None,
+    email_transport: object | None = None,
 ) -> dict:
     """Orchestrate the daily scan for the given universe scope.
 
@@ -219,30 +360,67 @@ def run_daily(
             indicator_rows: list[dict] = []
 
             for ind_name, mod in REGISTRY.items():
-                try:
-                    raw = mod.compute(prices)
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "[%s] indicator '%s' failed: %s — skipping.",
-                        ticker, ind_name, exc,
-                    )
-                    continue
+                if ind_name == "box_breakout":
+                    for mode in BOX_BREAKOUT_MODES:
+                        res = mode["resolution"]
+                        if mode["freq"]:
+                            df_run = resample_ohlcv(prices, mode["freq"])
+                        else:
+                            df_run = prices
+                            
+                        if df_run.empty:
+                            continue
+                        
+                        try:
+                            raw = mod.compute(df_run, **mode["params"])
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning(
+                                "[%s] indicator '%s' (%s) failed: %s — skipping.",
+                                ticker, ind_name, res, exc,
+                            )
+                            continue
+                        
+                        norm_val = normalize(ind_name, raw)
+                        direction = raw.get("direction") or raw.get("state")
+                        indicator_rows.append({
+                            "ticker":           ticker,
+                            "exchange":         exchange,
+                            "date":             effective_date,
+                            "indicator_name":   ind_name,
+                            "resolution":       res,
+                            "raw_value":        raw,
+                            "normalized_value": norm_val,
+                            "direction":        direction,
+                        })
+                        
+                        if res == "daily":
+                            ticker_raw[ind_name] = raw
+                        else:
+                            ticker_raw[f"{ind_name}_{res}"] = raw
+                else:
+                    try:
+                        raw = mod.compute(prices)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "[%s] indicator '%s' failed: %s — skipping.",
+                            ticker, ind_name, exc,
+                        )
+                        continue
 
-                norm_val = normalize(ind_name, raw)
-                # direction: trade indicators have "direction"; confirmation
-                # indicators have "state".  Prefer "direction".
-                direction = raw.get("direction") or raw.get("state")
+                    norm_val = normalize(ind_name, raw)
+                    direction = raw.get("direction") or raw.get("state")
 
-                indicator_rows.append({
-                    "ticker":           ticker,
-                    "exchange":         exchange,
-                    "date":             effective_date,
-                    "indicator_name":   ind_name,
-                    "raw_value":        raw,
-                    "normalized_value": norm_val,
-                    "direction":        direction,
-                })
-                ticker_raw[ind_name] = raw
+                    indicator_rows.append({
+                        "ticker":           ticker,
+                        "exchange":         exchange,
+                        "date":             effective_date,
+                        "indicator_name":   ind_name,
+                        "resolution":       "daily",
+                        "raw_value":        raw,
+                        "normalized_value": norm_val,
+                        "direction":        direction,
+                    })
+                    ticker_raw[ind_name] = raw
 
             if indicator_rows:
                 storage.write_indicator_outputs(indicator_rows)
@@ -274,7 +452,23 @@ def run_daily(
         # ── Verification output ────────────────────────────────────────────
         _emit_verification(ranked_df, output_path)
 
+        # ── Run Report Pipeline ────────────────────────────────────────────
+        r_dir = Path(report_dir) if report_dir else Path("data/reports")
+        report_summary = run_report_pipeline(
+            storage,
+            run_id,
+            effective_date,
+            scope,
+            r_dir,
+            send_email=send_email,
+            recipients=recipients,
+            from_addr=from_addr,
+            dashboard_url=dashboard_url,
+            email_transport=email_transport,
+        )
+
         return {
+            "run_id":              run_id,
             "fetched":             n_fetched,
             "skipped_idempotent":  n_skipped_idempotent,
             "failed":              n_failed,
@@ -282,6 +476,8 @@ def run_daily(
             "survivors":           len(survivors_df),
             "ranked":              len(ranked_df),
             "status":              status,
+            "briefing_generated":  report_summary["briefing_generated"],
+            "email_sent":          report_summary["email_sent"],
         }
 
 
@@ -344,25 +540,55 @@ def main() -> None:
         action="store_true",
         help="Force full re-fetch of all tickers, bypassing idempotency checks.",
     )
+    run_p.add_argument(
+        "--send-email",
+        action="store_true",
+        help="Send the daily report email.",
+    )
+    run_p.add_argument(
+        "--report-dir",
+        default=None,
+        metavar="PATH",
+        help="Directory to save the dashboard JSON and Excel report.",
+    )
 
     args = parser.parse_args()
 
     if args.cmd == "run-daily":
         try:
+            recipients = None
+            if "REPORT_RECIPIENTS" in os.environ:
+                recipients = [r.strip() for r in os.environ["REPORT_RECIPIENTS"].split(",") if r.strip()]
+            
+            from_addr = os.environ.get("REPORT_FROM_ADDR")
+
             summary = run_daily(
                 scope=args.universe,
                 output_path=args.output_path,
                 backfill=args.backfill,
+                send_email=args.send_email,
+                report_dir=args.report_dir,
+                recipients=recipients,
+                from_addr=from_addr,
             )
             print(
                 f"[scanner] run-daily complete: "
                 f"fetched={summary['fetched']}  "
                 f"survivors={summary['survivors']}  "
                 f"ranked={summary['ranked']}  "
+                f"briefing={summary['briefing_generated']}  "
+                f"email={summary['email_sent']}  "
                 f"status={summary['status']}"
             )
             if summary["budget_exhausted"]:
                 print("[scanner] WARNING: daily API budget exhausted mid-loop.")
+                
+            # Expose GitHub Actions outputs
+            if "GITHUB_OUTPUT" in os.environ:
+                with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+                    f.write(f"email_sent={str(summary['email_sent']).lower()}\n")
+                    f.write(f"run_id={summary['run_id']}\n")
+                    
             sys.exit(0)
         except Exception as exc:
             print(f"[scanner] run-daily failed: {exc}", file=sys.stderr)

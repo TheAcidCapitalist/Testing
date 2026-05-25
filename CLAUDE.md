@@ -209,9 +209,11 @@ confidently-wrong formula on the first run.
   - `scripts/inspect_box_breakout.py` — eyeball-check script (not a pytest test).
   - `src/scanner/indicators/__init__.py` — registry (auto-discovers non-underscore modules, `NAME` attribute).
 - **Phase C (complete ✓):**
-  - `src/scanner/data/storage.py` — **green ✓** (34 tests + 2 new methods). DuckDB two-layer storage.
-    Layer 1: `tbl_indicator_outputs` (ticker, exchange, date, indicator_name) — source of truth.
+  - `src/scanner/data/storage.py` — **green ✓** (36 tests + 2 new methods). DuckDB two-layer storage.
+    Layer 1: `tbl_indicator_outputs` (ticker, exchange, date, indicator_name, resolution) — source of truth.
     Layer 2: `tbl_combo_results` (ticker, exchange, date, combination_name) — derived, recomputable.
+    Includes `resolutions_available`, `resolutions_aligned`, `alignment_fraction` columns for
+    persisted MTF alignment (written by scoring, read by report layer).
     Also: `tbl_prices`, `tbl_universe`, `tbl_run_log`. All writes are upserts (INSERT OR REPLACE).
     JSON roundtrip for `raw_value` (dict) and `signals_firing` (list). Nullable `normalized_value`
     (mav_diff_z). Run-log supports idempotent re-runs (tickers_done JSON array).
@@ -225,7 +227,8 @@ confidently-wrong formula on the first run.
     `EODHDForbiddenError`, `EODHDNotFoundError`, `EODHDThrottleError`, `EODHDServerError`.
     API key from `.env` (`EODHD_API_KEY`) or passed explicitly. `httpx` + `python-dotenv` added to deps.
   - `src/scanner/data/__init__.py` — package marker.
-  - `tests/test_storage.py` — 34 tests (schema, idempotency, roundtrip, nullables, run-log lifecycle).
+  - `tests/test_storage.py` — 36 tests (schema, idempotency, roundtrip, nullables, run-log lifecycle,
+    MTF alignment column roundtrip).
   - `tests/test_eodhd.py` — 46 tests. HTTP fully mocked; storage uses real in-memory DuckDB.
     Covers: canonical shape, adjusted_close rename, budget enforcement (no HTTP call when exhausted),
     counter increment, same-day re-run persistence, error responses (401/403/404/423/429/5xx),
@@ -246,20 +249,84 @@ confidently-wrong formula on the first run.
     Bollinger normal/contrarian use direction-based normalization (buy→0.25, sell→0.75) — their
     `signal_value` is the raw z-score, not the three-value combo score.
     `mav_diff_z` returns `None` from `normalize()` — not in any combo (backtest exit only).
-    Rank weights: w_agree=0.40, w_magnitude=0.30, w_confirm=0.20, w_staleness=0.10, w_mtf=0.0.
-  - `src/scanner/cli.py` — **green ✓** (45 tests). Orchestrator + CLI entrypoint.
+    Rank weights: w_agree=0.40, w_magnitude=0.30, w_confirm=0.20, w_staleness=0.10, w_mtf=0.10
+    (provisional). MTF alignment term: weekly+monthly BB only (daily excluded — already in combo);
+    ≥2 gate means both must be present; dormant for stocks lacking ~20y history.
+    Surfaces `resolutions_available`, `resolutions_aligned`, `alignment_fraction` in the output
+    DataFrame → persisted in `tbl_combo_results` for the report layer. See
+    `spec/box-breakout-mt.md` §Stage 4.
+  - `src/scanner/cli.py` — **green ✓** (52 tests). Orchestrator + CLI entrypoint.
     `run_daily(scope, *, db_path, client, run_date, daily_budget_limit, output_path)` — injectable
     client for testing. Budget-aware loop: DailyBudgetExceeded stops fetching, run continues with
     stored data. Fetch idempotency: latest stored date >= run_date → skip fetch. No retry within
     run: failed fetch (404/5xx/network) logged and skipped. Single-ticker failure doesn't crash run.
-    Daily resolution only — resolution="daily" is the implicit schema value (MTF is v2).
+    Multi-resolution Box Breakout: orchestrator resamples daily OHLCV to weekly (W-FRI) and monthly
+    (ME), drops the trailing incomplete bar, and runs `box_breakout.compute()` per resolution.
+    Results stored under `(ticker, exchange, date, "box_breakout", resolution)` and passed to
+    scoring as `box_breakout_weekly` / `box_breakout_monthly` namespaced keys.
     No report/email/LLM — Phase D. Verification dump: top-10 ranked rows to stdout or CSV.
     CLI: `scanner run-daily --universe sample [--output-path PATH]`.
-  - `tests/test_cli.py` — 45 tests. Mock EODHD client; real tmp-path DuckDB. Covers: happy-path
+  - `tests/test_cli.py` — 55 tests. Mock EODHD client; real tmp-path DuckDB. Covers: happy-path
     (3 tickers: stored OHLCV + indicator outputs + combo results), budget exhaustion mid-loop,
-    failing ticker (404), no-retry, fetch idempotency, storage idempotency, post-ingest filter.
-- **Phase D scaffolds (exist, untested):** `src/scanner/report/` (excel, email, dashboard
-  json), `dashboard/artifact.html`, `.github/workflows/` (daily-scan + ci).
+    failing ticker (404), no-retry, fetch idempotency, storage idempotency, post-ingest filter,
+    MTF alignment bonus (matrix, Rule A combo-direction, Rule B ≥2 gate, combo-daily-only,
+    monthly positive control, seam-level monthly bonus),
+    alignment persistence (fraction matches rank contribution, zero when gate fails, zero when neutral).
+- **Phase D (in progress):**
+  - `spec/dashboard-json.md` — output contract for the canonical JSON that D2 Excel, D3 Haiku
+    briefing, and D5 dashboard all consume. Schema-versioned (`"1.0"`).
+  - `src/scanner/report/dashboard_json.py` — **green ✓** (24 tests). Host-agnostic emitter:
+    `build_dashboard_dict(storage, run_date, scope, ...)` → dict;
+    `write_dashboard_json(data, path)` → Path. Reads `read_combo_results_all`, `read_indicator_outputs`,
+    `read_universe`; no scoring, no fetching. Envelope: run_date, generated_at (UTC ISO-8601), scope,
+    combination_name, n_tickers_scored/universe, n_buy/sell/neutral, schema_version.
+    Per-ticker: core combo fields, universe meta (null-tolerant), mtf_alignment block (persisted,
+    not recomputed), indicator detail (full raw_value for non-neutral; summary-only for neutral).
+    Box Breakout MTF as flat keys. Tickers sorted by rank_score descending. Stdlib json only.
+  - `tests/test_dashboard_json.py` — 24 tests. Synthetic 3-ticker fixture. Covers: envelope shape
+    + field types, direction counts, ranked order, core fields, signals_firing as list, nullable
+    days_since_breakout, date format, universe meta + null tolerance, MTF alignment from persisted
+    values, indicator detail tiering (full vs summary), MTF flat keys, empty run, JSON round-trip,
+    read_combo_results_all storage reader.
+  - `src/scanner/data/storage.py` — added `read_combo_results_all(as_of_date, combination_name)`
+    for date+combination scoped queries across all tickers.
+  - `src/scanner/report/excel.py` — **green ✓** (16 tests). Consumes the canonical dashboard dict
+    (not DuckDB) and writes a ranked-summary .xlsx via openpyxl. Builder+writer split:
+    `build_excel_workbook(data)` → Workbook; `write_excel(data, path)` → Path.
+    One sheet ("Ranked Summary"): ticker, exchange, name, direction, combo/rank scores,
+    agreement (count/total), signals_firing (comma-joined), vol/volume confirmation,
+    days_since_breakout, alignment_fraction, sector, region, market_cap_usd.
+    Null-tolerant (blank cells, never "None"/"nan"). Preserves rank_score descending order
+    from the dict. openpyxl added as a real dependency (moved from dev-only).
+  - `tests/test_excel.py` — 16 tests. Structural only (not styling). Covers: sheet present,
+    row count == n_tickers_scored, ranked order preserved, required columns, null meta renders
+    as blank, empty-run header-only workbook, file write + parent dir creation, signals_firing
+    as comma string, agreement as fraction format.
+  - `src/scanner/agent/__init__.py` — package marker for agent sub-package.
+  - `src/scanner/agent/briefing.py` — **green ✓** (14 tests). Haiku briefing generator —
+    the first and only LLM in the pipeline. `generate_briefing(data, *, client, model)` →
+    `str | None`. Consumes only the canonical dashboard dict (JSON-only, no DuckDB).
+    Fail-soft: never raises; logs and returns `None` on any failure (missing key, network
+    error, empty response). Ships only envelope + non-neutral tickers to the model.
+    Injectable Anthropic client for testing; builds a real one from `ANTHROPIC_API_KEY`
+    when none is passed. Model configurable (default: `claude-haiku-4-20250414`).
+    Anthropic SDK added as a real dependency.
+  - `tests/test_briefing.py` — 14 tests. All mock the client (never hit live API). Covers:
+    happy-path returns model text, non-neutral-only payload, missing API key → None,
+    network/API error → None, malformed/empty response → None, empty-run dict handled,
+    malformed input (None data, missing keys), whitespace-only response → None.
+  - `src/scanner/report/email.py` — **green ✓** (14 tests). Daily report email sender via
+    Resend REST API (using `httpx`). `send_report(*, briefing, excel_path, recipients, subject, ...)`
+    → `SendResult`. Assembles the email body from pre-built pieces (plain string concatenation,
+    no jinja2/templates). Two key behaviours: (1) `None` briefing is normal and renders
+    gracefully; (2) Send failure is real failure — raises `SendError` (not swallowed) so
+    the orchestrator can detect non-delivery. Pluggable `Transport` for testing.
+  - `tests/test_email.py` — 14 tests. All mock the transport. Covers: success path (body +
+    attachment + recipients passed to transport), `None` briefing graceful handling, transport
+    errors surface as `SendError` / connection errors propagate, attachment included and base64
+    encoded, validation (missing recipients / missing excel).
+- **Phase D scaffolds (not yet implemented):**
+  `dashboard/artifact.html`, `.github/workflows/` (daily-scan + ci).
 
 ## Does not exist yet
 
@@ -304,11 +371,15 @@ data/           local DuckDB — gitignored                        [runtime only
 - `~/bin/uv run pytest tests/test_mav_diff_z.py` — 23 tests pass (numerical z-score + warmup + sign-change fixtures + zero-touch + consistency).
 - `~/bin/uv run pytest tests/test_mav_breakout.py` — 18 pass, 5 xfail (narrow_pct within 0.15 + synthetic firing logic + output contract + consistency; xfail = breakout_flag/days_since fixture can't match without full Bloomberg history).
 - `~/bin/uv run python scripts/inspect_box_breakout.py` — eyeball-check; prints boxes found on TSC data (no assertions).
-- `~/bin/uv run pytest tests/test_storage.py` — 34 tests pass (DuckDB storage: schema, upserts, JSON roundtrip, run-log lifecycle).
+- `~/bin/uv run pytest tests/test_storage.py` — 36 tests pass (DuckDB storage: schema, upserts, JSON roundtrip, run-log lifecycle, MTF alignment columns, read_combo_results_all).
 - `~/bin/uv run pytest tests/test_eodhd.py` — 46 tests pass (EODHD client: budget enforcement, rename, error handling, request params, bulk-eod flag).
 - `~/bin/uv run pytest tests/test_universe.py` — 35 tests pass (sample scope, market-cap filter, us/global metadata merging and caching, compute_adv, post-ingest filter boundaries).
-- `~/bin/uv run pytest tests/test_cli.py` — 45 tests pass (orchestrator + scoring: happy-path, budget exhaustion, 404 skip, no-retry, idempotency, post-ingest filter).
-- `~/bin/uv run ruff check src tests` — passes with 0 errors.
+- `~/bin/uv run pytest tests/test_cli.py` — 55 tests pass (orchestrator + scoring: happy-path, budget exhaustion, 404 skip, no-retry, idempotency, post-ingest filter, MTF alignment, alignment persistence).
+- `~/bin/uv run pytest tests/test_dashboard_json.py` — 24 tests pass (dashboard JSON emitter: envelope, ranked order, field types, universe meta, MTF alignment, indicator tiering, empty run, round-trip).
+- `~/bin/uv run pytest tests/test_excel.py` — 16 tests pass (Excel report: sheet present, row count, ranked order, required columns, null meta as blank, empty run, file write, signals_firing format, agreement format).
+- `~/bin/uv run pytest tests/test_briefing.py` — 14 tests pass (Haiku briefing: happy-path, non-neutral payload, missing key, client errors, malformed/empty response, empty run, whitespace).
+- `~/bin/uv run pytest tests/test_email.py` — 18 tests pass (Email sender: mock transport, success path, None briefing, error surfacing, attachment encoding, validation, ResendTransport shape/errors).
+- `~/bin/uv run ruff check src tests` — passes with 0 errors (pre-existing smoke script lint issues excluded).
 - `~/bin/uv run scanner run-daily --universe sample` — daily scan (requires `EODHD_API_KEY` in `.env`).
 
 ### Planned (Phase D+)
@@ -319,9 +390,16 @@ data/           local DuckDB — gitignored                        [runtime only
 
 # Current status
 
-**Phase A complete ✅. Phase B complete ✅. Phase C complete ✅ (sample scope). Phase D is next.**
+**Phase A complete ✅. Phase B complete ✅. Phase C complete ✅. Phase D complete pending dry-run ✅.**
 
-341 tests green. `~/bin/uv run ruff check src tests scripts` passes.
+432 tests green, 0 skipped. `~/bin/uv run ruff check src tests` passes.
+
+Box Breakout Multi-Timeframe upgrade (Stage 4) — complete:
+- Indicator stays single-timeframe; orchestrator resamples daily→weekly/monthly.
+- Per-resolution storage under `(ticker, exchange, date, indicator_name, resolution)` key.
+- Scoring alignment term: weekly+monthly only (daily excluded — already in combo).
+  `_W_MTF = 0.10` (provisional, Phase E calibrates). Dormant for stocks lacking ~20y history.
+- Spec: `spec/box-breakout-mt.md` — all 9 OPEN[#n] flags resolved.
 
 Live smoke test — 2026-05-21: `uv run scanner run-daily --universe sample` completed.
 - Upgraded to EODHD €19.99 tier (100k calls, 30+ yr history).
@@ -335,7 +413,6 @@ Live smoke test — 2026-05-21: `uv run scanner run-daily --universe sample` com
 
 Phase C caveats (not defects):
 - The `yfinance` metadata fetching fails gracefully on missing tickers by excluding them. Metadata cache refreshes after 30 days.
-- Daily resolution only. Multi-timeframe is the deferred Phase C addendum.
 
 Next: **Phase D** — deploy + v1 agentic layer.
 - `src/scanner/report/excel.py` — ranked Excel workbook.

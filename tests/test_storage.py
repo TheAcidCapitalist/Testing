@@ -293,6 +293,9 @@ def _combo_df() -> pd.DataFrame:
             "vol_confirmation":   "confirm",
             "volume_confirmation": "confirm",
             "days_since_breakout": 3,
+            "resolutions_available": 2,
+            "resolutions_aligned":  1,
+            "alignment_fraction":   0.5,
         }
     ])
 
@@ -350,6 +353,28 @@ def test_combo_results_signals_firing_already_json_string(db: Storage) -> None:
     raw = out["signals_firing"].iloc[0]
     parsed = json.loads(raw)
     assert parsed == ["rsi", "bollinger_normal", "stochastic"]
+
+
+def test_combo_results_alignment_columns_roundtrip(db: Storage) -> None:
+    """The 3 MTF alignment columns must survive write/read."""
+    db.write_combo_results(_combo_df())
+    out = db.read_combo_results("AAPL", "US", date(2024, 1, 5))
+    assert int(out["resolutions_available"].iloc[0]) == 2
+    assert int(out["resolutions_aligned"].iloc[0]) == 1
+    assert float(out["alignment_fraction"].iloc[0]) == pytest.approx(0.5)
+
+
+def test_combo_results_alignment_defaults_zero(db: Storage) -> None:
+    """When alignment columns are 0, they round-trip correctly."""
+    df = _combo_df()
+    df["resolutions_available"] = 0
+    df["resolutions_aligned"] = 0
+    df["alignment_fraction"] = 0.0
+    db.write_combo_results(df)
+    out = db.read_combo_results("AAPL", "US", date(2024, 1, 5))
+    assert int(out["resolutions_available"].iloc[0]) == 0
+    assert int(out["resolutions_aligned"].iloc[0]) == 0
+    assert float(out["alignment_fraction"].iloc[0]) == pytest.approx(0.0)
 
 
 # ── Run log ───────────────────────────────────────────────────────────────────

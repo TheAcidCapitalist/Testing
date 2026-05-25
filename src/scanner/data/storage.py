@@ -76,19 +76,34 @@ class Storage:
             )
         """)
         # Layer 1: per-indicator source of truth
+        # Migration: drop if old schema (no resolution column)
+        try:
+            self._con.execute("SELECT resolution FROM tbl_indicator_outputs LIMIT 1")
+        except duckdb.Error:
+            self._con.execute("DROP TABLE IF EXISTS tbl_indicator_outputs")
+            
         self._con.execute("""
             CREATE TABLE IF NOT EXISTS tbl_indicator_outputs (
                 ticker           VARCHAR NOT NULL,
                 exchange         VARCHAR NOT NULL,
                 date             DATE    NOT NULL,
                 indicator_name   VARCHAR NOT NULL,
+                resolution       VARCHAR DEFAULT 'daily',
                 raw_value        VARCHAR,  -- JSON: full compute() dict
                 normalized_value DOUBLE,   -- Stage-1 score 0-1; null for mav_diff_z
                 direction        VARCHAR,  -- 'buy'|'sell'|'neutral'|null
-                PRIMARY KEY (ticker, exchange, date, indicator_name)
+                PRIMARY KEY (ticker, exchange, date, indicator_name, resolution)
             )
         """)
         # Layer 2: derived combo + ranking (recomputeable from layer 1)
+        # Migration: drop if old schema (no alignment columns)
+        try:
+            self._con.execute(
+                "SELECT resolutions_available FROM tbl_combo_results LIMIT 1"
+            )
+        except duckdb.Error:
+            self._con.execute("DROP TABLE IF EXISTS tbl_combo_results")
+
         self._con.execute("""
             CREATE TABLE IF NOT EXISTS tbl_combo_results (
                 ticker                VARCHAR NOT NULL,
@@ -104,6 +119,9 @@ class Storage:
                 vol_confirmation      VARCHAR,
                 volume_confirmation   VARCHAR,
                 days_since_breakout   INTEGER,
+                resolutions_available INTEGER DEFAULT 0,
+                resolutions_aligned   INTEGER DEFAULT 0,
+                alignment_fraction    DOUBLE  DEFAULT 0.0,
                 PRIMARY KEY (ticker, exchange, date, combination_name)
             )
         """)
@@ -121,6 +139,13 @@ class Storage:
                 PRIMARY KEY (run_id)
             )
         """)
+
+        # Migration: add briefing_generated and email_sent columns
+        try:
+            self._con.execute("SELECT briefing_generated FROM tbl_run_log LIMIT 1")
+        except duckdb.Error:
+            self._con.execute("ALTER TABLE tbl_run_log ADD COLUMN briefing_generated BOOLEAN")
+            self._con.execute("ALTER TABLE tbl_run_log ADD COLUMN email_sent BOOLEAN")
 
     # ── Universe ─────────────────────────────────────────────────────────────
 
@@ -179,6 +204,7 @@ class Storage:
 
         Each dict must contain:
             ticker, exchange, date, indicator_name,
+            resolution (optional, defaults to 'daily'),
             raw_value (dict — serialised to JSON),
             normalized_value (float | None),
             direction (str | None).
@@ -193,6 +219,7 @@ class Storage:
                 "exchange":         r["exchange"],
                 "date":             r["date"],
                 "indicator_name":   r["indicator_name"],
+                "resolution":       r.get("resolution", "daily"),
                 "raw_value":        json.dumps(rv) if isinstance(rv, dict) else rv,
                 "normalized_value": r.get("normalized_value"),
                 "direction":        r.get("direction"),
@@ -207,8 +234,9 @@ class Storage:
         ticker: str,
         exchange: str,
         as_of_date: date | str,
+        resolution: str = "daily",
     ) -> dict[str, dict]:
-        """Return indicator outputs for one (ticker, exchange, date).
+        """Return indicator outputs for one (ticker, exchange, date, resolution).
 
         Returns {indicator_name: {raw_value, normalized_value, direction}}.
         raw_value is a dict (deserialised from JSON), or None.
@@ -216,8 +244,8 @@ class Storage:
         rows = self._con.execute(
             """SELECT indicator_name, raw_value, normalized_value, direction
                FROM tbl_indicator_outputs
-               WHERE ticker = ? AND exchange = ? AND date = ?""",
-            [ticker, exchange, as_of_date],
+               WHERE ticker = ? AND exchange = ? AND date = ? AND resolution = ?""",
+            [ticker, exchange, as_of_date, resolution],
         ).fetchall()
         return {
             row[0]: {
@@ -259,6 +287,21 @@ class Storage:
             [ticker, exchange, as_of_date],
         ).df()
 
+    def read_combo_results_all(
+        self,
+        as_of_date: date | str,
+        combination_name: str = "default",
+    ) -> pd.DataFrame:
+        """Return combo results for **all** tickers on a given date and combination.
+
+        Row order is unspecified — callers must sort as needed.
+        """
+        return self._con.execute(
+            """SELECT * FROM tbl_combo_results
+               WHERE date = ? AND combination_name = ?""",
+            [as_of_date, combination_name],
+        ).df()
+
     # ── Run log ───────────────────────────────────────────────────────────────
 
     def log_run_start(self, run_id: str, run_date: date, scope: str) -> None:
@@ -293,6 +336,15 @@ class Storage:
                SET status = ?, api_calls_used = ?, finished_at = current_timestamp
                WHERE run_id = ?""",
             [status, api_calls, run_id],
+        )
+
+    def log_run_report_status(self, run_id: str, briefing_generated: bool, email_sent: bool) -> None:
+        """Record the final report status for the run (whether the briefing was generated and email sent)."""
+        self._con.execute(
+            """UPDATE tbl_run_log
+               SET briefing_generated = ?, email_sent = ?
+               WHERE run_id = ?""",
+            [briefing_generated, email_sent, run_id],
         )
 
     def get_api_calls_used(self, run_id: str) -> int:

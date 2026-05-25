@@ -175,7 +175,7 @@ receives (daily, weekly, monthly, or quarterly) and applies the same logic. The
 orchestrator (Phase C addendum) handles resampling daily OHLCV into coarser
 resolutions; multi-timeframe alignment (ranking stocks that fire on multiple
 resolutions simultaneously) is handled in the scoring layer. Do not put resampling
-logic or resolution-awareness inside this function. See `spec/multi-timeframe.md`.
+logic or resolution-awareness inside this function. See `spec/box-breakout-mt.md`.
 
 It is **complementary to MAV Breakout**, not a duplicate. MAV Breakout uses
 moving-average *band* compression as the proxy for consolidation. Box Breakout uses
@@ -189,218 +189,52 @@ source beyond the standard OHLCV bars every other indicator consumes.
 
 The brief describes two detection signals that compose the congestion diagnosis:
 
-**Signal A — Resistance-zone proximity:**
-The rolling maximum high over the lookback window defines a resistance ceiling. The
-stock is considered to be approaching or testing this ceiling when:
-```
-close >= resistance_zone × (1 − touch_tolerance)
-```
-`touch_tolerance` scales with timeframe and base age: ~5% for short-term daily
-bases, ~10–20% for multi-year bases (long bases are inherently wider).
+### Congestion Predicate (The Core Algorithm)
 
-**Signal B — Volatility compression:**
-The price action is tightening, measured by one of:
-- **ATR ratio:** `ATR(atr_window) / ATR(atr_long_window)` — a low ratio signals
-  compression. Scale-invariant; works on any bar resolution.
-- **Bollinger Band Width:** `(upper_band − lower_band) / middle_band`.
-- **Range-to-ATR ratio:** `(rolling_high − rolling_low) / ATR(atr_window)`.
+A fixed lookback window of length `lookback` is analyzed for each bar `i`.
+The window `W` spans from `i - lookback` to `i - 1`.
 
-Default metric: ATR ratio. The compression threshold is a parameter. All three metrics
-are scale-invariant and work identically on daily, weekly, or monthly bars.
+Within window `W`:
+- `box_high` = maximum `high` over `W`.
+- `box_low` = minimum `low` over `W`.
 
-**⚠ Open question #2 — AND vs OR:**
-The brief lists both signals without specifying their logical relationship. Options:
-- **(A) AND:** Both resistance-zone proximity AND volatility compression must be active
-  for the congestion zone to qualify. More precise; may miss wide-but-persistent bases
-  where Signal A does not fire until very late in the consolidation.
-- **(B) OR:** Either signal is sufficient. More permissive; risks firing on trending
-  markets approaching a prior resistance level without genuine compression.
-- **(C) Hybrid:** Both required on the breakout bar; only one required for each bar
-  to count toward the minimum-duration percentage.
+A single bar `j` within `W` is **bullish-congested** if it satisfies BOTH:
+1. **Resistance-zone proximity**: `close[j] >= box_high * (1 - touch_tolerance)`
+2. **Volatility compression**: `ATR(atr_window)[j] / ATR(atr_long_window)[j] <= compression_threshold`
 
-**Resolution pending user decision.** The v1 implementation uses Signal A (tightness
-test) only.
+A single bar `j` within `W` is **bearish-congested** if it satisfies BOTH:
+1. **Support-zone proximity**: `close[j] <= box_low * (1 + touch_tolerance)`
+2. **Volatility compression**: `ATR(atr_window)[j] / ATR(atr_long_window)[j] <= compression_threshold`
 
-### Minimum duration
+For the current bar `i`:
+- The setup has a **valid bullish box** if the count of bullish-congested bars in `W` is `>= lookback * duration_pct`.
+- The setup has a **valid bearish box** if the count of bearish-congested bars in `W` is `>= lookback * duration_pct`.
 
-Congestion must persist for at least `min_congestion_pct` of the lookback window
-(default: `0.75` — the midpoint of the brief's 70–80% guidance). For a 60-bar
-lookback, at least 45 bars must be in congestion; for a 104-week lookback, at least
-78 weeks.
+### Breakout Trigger
 
-**v1 compatibility:** The existing implementation uses `min_congestion_bars` (default
-15, absolute). The percentage-based default (`lookback=60, min_congestion_pct=0.75`)
-yields a minimum of 45 bars — materially different from 15. Both parameters are
-preserved; `min_congestion_pct` governs when `lookback` is set. The v1 tests remain
-valid against their original parameter set.
+If a valid box exists, we check bar `i` for a breakout:
+- **Bullish breakout (buy)**: Valid bullish box AND `close[i] > box_high * (1 + breakout_buffer)`.
+- **Bearish breakdown (sell)**: Valid bearish box AND `close[i] < box_low * (1 - breakout_buffer)`.
 
-**⚠ Open question #3 — Definition of "true congestion" per bar:**
-To count toward the minimum-duration percentage, a bar must be "in congestion." The
-brief does not define this per-bar criterion. Options:
-- **(A) Tightness test (current v1):** Including bar i does not cause
-  `tightness(run_high, run_low)` to exceed `max_range`.
-- **(B) Signal B only:** Bar i shows volatility compression (Signal B active on bar i).
-- **(C) Both signals active on bar i.**
-- **(D) No new range extremes:** Bar i does not set a new high or low outside a
-  tolerance band around the running box edges.
-
-**Resolution pending user decision.**
+**Volume expansion (conditional extra):**
+Volume is not gated. It stays a separate confirmation indicator. However, the indicator exposes a `volume_expansion` boolean extra:
+`volume_expansion = volume[i] >= vol_mult * rolling_mean(volume, vol_window)[i-1]`.
 
 ### Parameters
 
 | Param | Default | Meaning |
 |-------|---------|---------|
-| `lookback` | 60 | Lookback window in bars. Resolution-agnostic: 60 daily bars ≈ 3 months; 60 weekly bars ≈ 14 months. See `spec/multi-timeframe.md` for per-mode recommendations. |
-| `min_congestion_pct` | 0.75 | Fraction of `lookback` that must be in congestion (0.75 = 75%). Governs when `lookback` is set; falls back to `min_congestion_bars` otherwise. |
-| `min_congestion_bars` | 15 | v1 absolute minimum (preserved for backward compatibility). |
-| `max_range` | 0.06 | Maximum tightness for the running box. With `range_metric="pct"`, 0.06 = 6% of midprice. With `"atr"`, ATR multiples (e.g. 3.0). |
-| `range_metric` | `"pct"` | `"pct"` or `"atr"`. ATR-based is more robust across volatility regimes and price levels. |
-| `atr_window` | 14 | Short ATR lookback. Used when `range_metric="atr"`, for the ATR-ratio compression metric, and for the ATR-expansion breakout condition. |
-| `atr_long_window` | 50 | Longer ATR baseline for the ATR-ratio compression metric and the ATR-expansion condition. |
-| `touch_tolerance` | 0.05 | Resistance-zone proximity band for Signal A (0.05 = 5% of rolling max high). |
-| `breakout_buffer` | 0.0 | Additional price clearance beyond the resistance level for the breakout trigger. ⚠ See open question #1. Default 0 for v1; tune in Phase E. |
-| `vol_expansion_factor` | `None` | Volume must be ≥ this multiple of the trailing average to confirm a breakout. `None` = not checked in trigger. ⚠ See architectural decision below. |
-| `vol_window` | 20 | Trailing volume average window for `vol_expansion_factor`. |
-| `atr_expansion_factor` | `None` | Current `ATR(atr_window)` must be ≥ this multiple of `ATR(atr_long_window)` to confirm a breakout. `None` = not checked. ⚠ See open question #4. |
-| `trend_filter_window` | `None` | Bars for an optional trend-filter MA. `None` = disabled. If set, bullish breakouts only when `close > SMA(trend_filter_window)`; bearish only when `close < SMA`. |
-| `confirmed_close` | `True` | If `True`, only act on fully-closed bars. If `False`, flag in-progress breakouts on the forming bar. ⚠ See open question #5. |
+| `lookback` | 60 | Fixed lookback window length. |
+| `duration_pct` | 0.75 | Fraction of `lookback` that must be congested (e.g. 0.75 = 75%). |
+| `touch_tolerance` | 0.05 | Proximity band for Signal A (e.g. 0.05 = 5%). |
+| `compression_threshold` | 0.8 | Threshold for ATR ratio. |
+| `atr_window` | 14 | Short ATR lookback. |
+| `atr_long_window` | 50 | Longer ATR baseline. |
+| `breakout_buffer` | 0.0 | Additional price clearance beyond the box edge (percentage). |
+| `vol_mult` | 1.5 | Volume must be ≥ this multiple of trailing average to set `volume_expansion=True`. |
+| `vol_window` | 20 | Trailing volume average window for `vol_mult`. |
 | `breakout_recency` | 3 | A breakout stays "fresh" for this many bars. |
-
-All defaults are starting points — tune in Phase E (backtest), not by eye.
-
-### Open question #1 — Resistance zone vs. breakout level
-
-The brief says the resistance zone is the rolling maximum high and the breakout is
-"close above the resistance zone." It is ambiguous whether:
-- **(A) Breakout = close > max_high** — strict rolling ceiling, no buffer.
-- **(B) Breakout = close > max_high + buffer_abs** — price clears the ceiling by an
-  additional buffer (the v1 `breakout_buffer` approach; `breakout_buffer=0.0` in the
-  enhanced spec makes option A the default).
-- **(C) Signal A touch ≠ breakout trigger:** Signal A fires when close is *within*
-  tolerance of max_high (approaching resistance); the breakout trigger fires when close
-  *clears* max_high by a buffer. These are distinct events.
-
-Option (C) is the most internally consistent with the two-signal design: Signal A is
-the "approaching" event; the breakout is the "cleared" event. **Resolution pending
-user decision.**
-
-### Open question #4 — ATR expansion threshold
-
-The brief specifies "expansion in ATR" as part of the breakout trigger but does not
-define:
-- What multiple of a baseline ATR constitutes "expansion" (1.1×? 1.5×? 2×?).
-- What the baseline is: `ATR(atr_long_window)` vs. a 52-period ATR?
-- Whether this is a hard gate (no breakout signal without ATR expansion) or an
-  advisory demotion in ranking.
-
-**Resolution pending user decision.**
-
-### Open question #5 — Confirmed-close vs in-progress
-
-On weekly and monthly bars the current bar may still be forming (a weekly bar captured
-on Wednesday; a monthly bar captured on the 10th). Options:
-- **(A) Confirmed only (default):** Only act on fully-closed bars. Lags by at most one
-  bar period. `confirmed_close=True`.
-- **(B) In-progress:** Flag intrabar moves above resistance. Useful for early alerts;
-  may produce false positives when the bar closes back inside the zone.
-- **(C) Both, flagged:** Compute both; label the signal `"confirmed"` or `"in_progress"`.
-
-**Resolution pending user decision.**
-
-### Breakout trigger
-
-The breakout fires on the bar that exits a valid congestion zone (meeting the minimum
-duration requirement). Trigger conditions, in order:
-
-**Price condition (required):**
-`close > resistance_level` — where `resistance_level` is defined per open question #1.
-The current v1 default uses `resistance_level = run_high` with `breakout_buffer=0.0`.
-
-**ATR expansion (conditional — open question #4):**
-If `atr_expansion_factor` is not `None`:
-`ATR(atr_window) >= atr_expansion_factor × ATR(atr_long_window)`.
-
-**Volume expansion (conditional — architectural decision below):**
-If `vol_expansion_factor` is not `None`:
-`volume >= vol_expansion_factor × rolling_mean(volume, vol_window)`.
-The brief specifies 1.5–2× the trailing average as the typical range.
-
-**Optional trend filter:**
-If `trend_filter_window` is not `None`, bullish breakouts require `close > SMA(close,
-trend_filter_window)`; bearish require `close < SMA`. Typical values: 200 bars for
-daily, 40 for weekly, 10 for monthly. The indicator does not know its resolution — the
-caller passes the appropriate window.
-
-### Architectural decision — volume in trigger vs. separate indicator
-
-**This is the key design tension from the brief and requires user resolution.**
-
-The brief specifies volume ≥ 1.5–2× trailing average as part of the breakout
-*trigger* — i.e., no volume expansion means no signal. The current architecture has
-Volume as a separate confirmation indicator (#11): it does not gate signals, it only
-*demotes* them in the ranking (the explicit v1 decision: "demote, do not remove").
-
-Options:
-- **(A) Keep volume separate (current architecture).** `vol_expansion_factor=None` by
-  default. A low-volume breakout appears in the output but is demoted in ranking via
-  indicator #11. Preserves the clean layer separation. **Recommended for v1.**
-- **(B) Integrate volume into the trigger.** Set a non-`None` default for
-  `vol_expansion_factor`. A breakout without volume expansion produces
-  `direction="neutral"`. Indicator #11 becomes partially redundant for Box Breakout
-  signals. Tighter signals, fewer false positives.
-- **(C) Soft gate — new direction value.** A low-volume breakout produces
-  `direction="buy_unconfirmed"`. The scoring layer treats it differently from a
-  confirmed buy. Requires extending the direction enum and updating all downstream
-  consumers.
-
-**Recommendation: Option (A) for v1.** Revisit in Phase E if the backtest shows that
-requiring volume expansion materially improves signal quality beyond the demotion
-mechanism.
-
-### Detection algorithm
-
-Single forward pass over the chronologically-ordered bars (O(n), same structure as v1):
-
-```
-min_cong_bars = round(min_congestion_pct × lookback)   # if lookback is set
-                OR min_congestion_bars                    # v1 fallback
-
-state: current_run_start = 0
-       run_high = high[0], run_low = low[0]
-
-for i in 1 .. n-1:
-    candidate_high = max(run_high, high[i])
-    candidate_low  = min(run_low,  low[i])
-
-    if tightness(candidate_high, candidate_low) <= max_range:
-        # bar i extends the current congestion run
-        run_high, run_low = candidate_high, candidate_low
-        continue
-
-    # bar i did NOT fit — the run [current_run_start .. i-1] has ended
-    run_len = i - current_run_start
-    if run_len >= min_cong_bars:
-        # valid congestion zone; is bar i a breakout?
-        resistance = run_high                              # ⚠ open question #1
-        buffer_abs = convert_buffer(breakout_buffer, midprice, atr)
-        if close[i] > resistance + buffer_abs:
-            # check optional ATR expansion, volume expansion, trend filter
-            breakout_dir = +1  # if all active conditions pass; else 0
-        elif close[i] < run_low - buffer_abs:
-            breakout_dir = -1  # ditto
-        else:
-            breakout_dir = 0   # no breakout (run ended quietly)
-        record box: {start, end=i-1, high=run_high, low=run_low, breakout_dir}
-
-    # start a fresh run at bar i
-    current_run_start = i
-    run_high, run_low = high[i], low[i]
-```
-
-Signal B (volatility compression) runs in parallel over the same forward pass,
-tracking whether each bar in the running box also meets the compression criterion.
-Open question #2 (AND vs OR) determines how Signal B gates the congestion
-qualification and the breakout decision.
+| `mode` | `"confirmed"` | Operate on completed bars. |
 
 ### Output contract (latest bar)
 
@@ -424,23 +258,13 @@ last `breakout_recency` bars, `sell` if `−1`, else `neutral`.
 
 ### Validation
 
-**No ground-truth row in the 2012 spreadsheet.** The six v1 synthetic fixtures remain
-the primary validation; all existing tests remain valid against the v1 parameter set:
-
-- `flat_then_breakout_up.csv` — bullish breakout after extended congestion
-- `flat_then_breakout_down.csv` — bearish mirror
-- `false_poke.csv` — intrabar poke, close back inside
-- `too_short.csv` — congestion below minimum duration
-- `trending_no_box.csv` — no congestion at all
-- `recency_expired.csv` — valid breakout but stale (beyond `breakout_recency`)
-
+**No ground-truth row in the 2012 spreadsheet.** The synthetic fixtures remain
+the primary validation; all existing tests remain valid against the v1 parameter set.
 Additional synthetic fixtures required for the Phase B addendum (enhanced-spec tests):
 
-- **`pct_duration_threshold.csv`** — base spanning exactly `min_congestion_pct` of
-  `lookback`; one bar shorter must not qualify.
-- **`vol_expansion_trigger.csv`** — breakout bar with and without sufficient volume,
-  when `vol_expansion_factor` is set.
-- **`trend_filter_gated.csv`** — valid breakout that is suppressed by the trend filter.
+- **`pct_duration_threshold.csv`**
+- **`vol_expansion_trigger.csv`**
+- **`trend_filter_gated.csv`**
 
 #### Eyeball check (secondary)
 

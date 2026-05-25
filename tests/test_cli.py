@@ -37,6 +37,12 @@ from scanner.scoring import normalize, score_tickers
 # Helpers
 # ---------------------------------------------------------------------------
 
+@pytest.fixture(autouse=True)
+def mock_generate_briefing():
+    """Ensure no test in this file hits the live Anthropic API."""
+    with patch("scanner.cli.generate_briefing", return_value="Mocked briefing") as m:
+        yield m
+
 _TODAY = date(2024, 6, 3)  # fixed date so tests don't depend on the real clock
 
 
@@ -255,6 +261,154 @@ class TestScoreTickers:
         df = score_tickers(outputs, _TODAY)
         assert df.iloc[0]["rank_score"] >= df.iloc[1]["rank_score"]
 
+    def test_mtf_alignment_matrix(self):
+        """Test alignment bonus at 0, 1, 2, 3 aligned resolutions."""
+        base = self._outputs("buy")
+        
+        # 0 aligned (only daily present, and it's opposite or neutral)
+        # Wait, if only daily present, it's 1 resolution, bonus is 0 by Rule B.
+        # Let's give all 3 resolutions.
+        base["box_breakout"] = {"direction": "buy", "signal_value": 0.25}
+        base["box_breakout_weekly"] = {"direction": "buy", "signal_value": 0.25}
+        base["box_breakout_monthly"] = {"direction": "buy", "signal_value": 0.25}
+        
+        df_3 = score_tickers({("A", "US"): base}, _TODAY)
+        score_3 = df_3.iloc[0]["rank_score"]
+        
+        # 2 aligned
+        base_2 = dict(base)
+        base_2["box_breakout_monthly"] = {"direction": "neutral", "signal_value": 0.5}
+        df_2 = score_tickers({("A", "US"): base_2}, _TODAY)
+        score_2 = df_2.iloc[0]["rank_score"]
+        
+        # 1 aligned
+        base_1 = dict(base_2)
+        base_1["box_breakout_weekly"] = {"direction": "sell", "signal_value": 0.75}
+        df_1 = score_tickers({("A", "US"): base_1}, _TODAY)
+        score_1 = df_1.iloc[0]["rank_score"]
+        
+        # 0 aligned
+        base_0 = dict(base_1)
+        base_0["box_breakout"] = {"direction": "sell", "signal_value": 0.75} # Wait, if daily BB is sell, the combo direction might change!
+        # Instead, make BB neutral. The combo will still be "buy" because 7 other indicators are buy!
+        base_0["box_breakout"] = {"direction": "neutral", "signal_value": 0.5}
+        df_0 = score_tickers({("A", "US"): base_0}, _TODAY)
+        score_0 = df_0.iloc[0]["rank_score"]
+        
+        assert score_3 > score_2 > score_1 > score_0
+
+    def test_mtf_rule_a_combo_direction_alignment(self):
+        """Rule A: Align to combo direction, not daily BB."""
+        base = self._outputs("buy")
+        # Make other indicators extremely strong "buy" so combo average stays < 0.3
+        base["rsi"]["rsi"] = 0.0
+        base["stochastic"]["signal_value"] = 0.0
+        base["box_breakout"] = {"direction": "neutral", "signal_value": 0.5}
+        # weekly and monthly are buy
+        base["box_breakout_weekly"] = {"direction": "buy", "signal_value": 0.25}
+        base["box_breakout_monthly"] = {"direction": "buy", "signal_value": 0.25}
+        
+        df = score_tickers({("A", "US"): base}, _TODAY)
+        
+        # Combo direction should still be buy
+        assert df.iloc[0]["direction"] == "buy"
+        
+        # Bonus should be applied! n_resolutions=3, aligned=2.
+        # Let's compare to when weekly/monthly are neutral.
+        base_no_bonus = dict(base)
+        base_no_bonus["box_breakout_weekly"] = {"direction": "neutral", "signal_value": 0.5}
+        base_no_bonus["box_breakout_monthly"] = {"direction": "neutral", "signal_value": 0.5}
+        
+        df_no = score_tickers({("A", "US"): base_no_bonus}, _TODAY)
+        
+        assert df.iloc[0]["rank_score"] > df_no.iloc[0]["rank_score"]
+
+    def test_mtf_combo_daily_only(self):
+        """Verify combo_score only relies on daily BB."""
+        base = self._outputs("buy")
+        df_base = score_tickers({("A", "US"): base}, _TODAY)
+        
+        base_with_mtf = dict(base)
+        base_with_mtf["box_breakout_weekly"] = {"direction": "sell", "signal_value": 0.75}
+        df_mtf = score_tickers({("A", "US"): base_with_mtf}, _TODAY)
+        
+        # combo_score should be exactly equal
+        assert df_base.iloc[0]["combo_score"] == pytest.approx(df_mtf.iloc[0]["combo_score"])
+
+    def test_mtf_rule_b_single_resolution_zero_bonus(self):
+        """With daily excluded from alignment, having only one MTF resolution
+        (e.g. weekly only) gives 0 bonus — the ≥2 gate on [weekly, monthly]
+        requires both to be present."""
+        base = self._outputs("buy")
+        base["box_breakout"] = {"direction": "buy", "signal_value": 0.25}
+
+        # Weekly only — one MTF resolution → 0 bonus
+        one_mtf = dict(base)
+        one_mtf["box_breakout_weekly"] = {"direction": "buy", "signal_value": 0.25}
+        df_one = score_tickers({("A", "US"): one_mtf}, _TODAY)
+        score_one = df_one.iloc[0]["rank_score"]
+
+        # No MTF at all → also 0 bonus
+        df_none = score_tickers({("A", "US"): base}, _TODAY)
+        score_none = df_none.iloc[0]["rank_score"]
+
+        # Both should be identical (0 MTF bonus in each case)
+        assert score_one == pytest.approx(score_none)
+
+        # Now add monthly — both MTF resolutions present → bonus fires
+        both_mtf = dict(one_mtf)
+        both_mtf["box_breakout_monthly"] = {"direction": "buy", "signal_value": 0.25}
+        df_both = score_tickers({("A", "US"): both_mtf}, _TODAY)
+        score_both = df_both.iloc[0]["rank_score"]
+
+        # 2/2 aligned → full _W_MTF (0.10) bonus
+        assert score_both > score_one + 0.09
+
+    def test_alignment_fraction_persisted_matches_rank_contribution(self):
+        """alignment_fraction in the output must equal the value fed into
+        rank_score via _W_MTF.  No drift between stored and scored."""
+        base = self._outputs("buy")
+        base["box_breakout"] = {"direction": "buy", "signal_value": 0.25}
+        base["box_breakout_weekly"] = {"direction": "buy", "signal_value": 0.25}
+        base["box_breakout_monthly"] = {"direction": "neutral", "signal_value": 0.5}
+
+        df = score_tickers({("A", "US"): base}, _TODAY)
+        row = df.iloc[0]
+
+        # With daily excluded, weekly=buy (aligned), monthly=neutral (not aligned)
+        # n_resolutions=2, resolutions_aligned=1, fraction=0.5
+        assert int(row["resolutions_available"]) == 2
+        assert int(row["resolutions_aligned"]) == 1
+        assert float(row["alignment_fraction"]) == pytest.approx(0.5)
+
+        # Verify the fraction is what actually drove rank_score:
+        # rank_score_with_mtf - rank_score_without_mtf ≈ _W_MTF * fraction
+        base_no_mtf = {k: v for k, v in base.items()
+                       if k not in ("box_breakout_weekly", "box_breakout_monthly")}
+        df_no = score_tickers({("A", "US"): base_no_mtf}, _TODAY)
+        delta = float(row["rank_score"]) - float(df_no.iloc[0]["rank_score"])
+        # _W_MTF=0.10, fraction=0.5 → delta should be 0.05
+        assert delta == pytest.approx(0.10 * 0.5, abs=1e-9)
+
+    def test_alignment_fraction_zero_when_gate_fails(self):
+        """When the ≥2 gate fails, all three alignment columns should be 0."""
+        base = self._outputs("buy")
+        # Only daily present (no weekly/monthly)
+        df = score_tickers({("A", "US"): base}, _TODAY)
+        row = df.iloc[0]
+        assert int(row["resolutions_available"]) == 0
+        assert int(row["resolutions_aligned"]) == 0
+        assert float(row["alignment_fraction"]) == pytest.approx(0.0)
+
+    def test_alignment_fraction_zero_when_neutral(self):
+        """When combo direction is neutral, alignment is 0 regardless of MTF data."""
+        base = self._outputs("neutral")
+        base["box_breakout_weekly"] = {"direction": "buy", "signal_value": 0.25}
+        base["box_breakout_monthly"] = {"direction": "buy", "signal_value": 0.25}
+        df = score_tickers({("A", "US"): base}, _TODAY)
+        row = df.iloc[0]
+        assert float(row["alignment_fraction"]) == pytest.approx(0.0)
+
 
 # ---------------------------------------------------------------------------
 # Fixtures for orchestrator tests
@@ -333,6 +487,117 @@ class TestHappyPath:
             outputs = s.read_indicator_outputs("AAPL", "US", _TODAY)
             for ind_name in REGISTRY:
                 assert ind_name in outputs, f"Missing indicator output: {ind_name}"
+
+    def test_monthly_alignment_positive_control(self, tmp_path):
+        """End-to-end positive control for monthly Box Breakout and alignment.
+
+        Why 5400 bars + May breakout:
+          - 5400 bdays ≈ 21.4 years → 249 completed monthly bars after the
+            confirmed-close rule drops the partial June period.
+          - monthly lookback = 240; the indicator needs n > lookback to iterate.
+          - The breakout is placed on the last daily bar of May 2024, which
+            rolls up into the last *completed* monthly bar (May 31 close).
+          - Daily and weekly resolutions also see the same price spike.
+        """
+        n = 5400
+        prices = _make_prices(n, close=100.0)
+        # Place the breakout on the last bar of May 2024 (a completed monthly close)
+        may_mask = [d.year == 2024 and d.month == 5 for d in prices["date"]]
+        may_indices = [i for i, v in enumerate(may_mask) if v]
+        last_may_idx = may_indices[-1]
+        prices.iloc[last_may_idx, prices.columns.get_loc("close")] = 110.0
+        prices.iloc[last_may_idx, prices.columns.get_loc("high")] = 112.0
+
+        tickers = {"AAPL": prices}
+        client = _mock_client_factory(tickers)
+        db = _db(tmp_path)
+        
+        with patch("scanner.data.universe.SAMPLE_UNIVERSE", _sample_universe(["AAPL"])):
+            run_daily(scope="sample", db_path=db, client=client, run_date=_TODAY)
+            
+        with Storage(db) as s:
+            # All 3 resolutions must be stored and must have fired "buy".
+            # This exercises the full monthly path end-to-end.
+            daily_out = s.read_indicator_outputs("AAPL", "US", _TODAY, resolution="daily")
+            weekly_out = s.read_indicator_outputs("AAPL", "US", _TODAY, resolution="weekly")
+            monthly_out = s.read_indicator_outputs("AAPL", "US", _TODAY, resolution="monthly")
+
+            assert "box_breakout" in daily_out, "daily box_breakout missing"
+            assert "box_breakout" in weekly_out, "weekly box_breakout missing"
+            assert "box_breakout" in monthly_out, "monthly box_breakout missing"
+
+            assert daily_out["box_breakout"]["direction"] == "buy", "daily BB should be buy"
+            assert weekly_out["box_breakout"]["direction"] == "buy", "weekly BB should be buy"
+            assert monthly_out["box_breakout"]["direction"] == "buy", "monthly BB should be buy"
+
+            # The combo direction is neutral for this flat-price fixture because the
+            # other 9 indicators see no signal on a flat series. That is correct
+            # behaviour: combo neutrality gates the alignment bonus (Rule A).
+            # What this test validates is that the monthly BB path fires and stores
+            # correctly; the rank_score > base comparison is done in the unit tests.
+            combo = s.read_combo_results("AAPL", "US", _TODAY)
+            assert not combo.empty, "No combo results written"
+
+    def test_monthly_alignment_bonus_at_seam(self, tmp_path):
+        """Prove a real orchestrator-computed monthly breakout produces a non-zero
+        alignment bonus when the combo direction is non-neutral.
+
+        The flat-base fixture fires monthly but neutralises the combo (the 9 other
+        indicators see a flat line). Testing at the orchestrator→scoring seam:
+        run the orchestrator to get real per-resolution BB outputs, then inject
+        them into a hand-built directional outputs dict and assert rank_score
+        is strictly greater with the MTF keys present than without.
+        """
+        # ── Step 1: run the orchestrator to produce real MTF BB outputs ────
+        n = 5400
+        prices = _make_prices(n, close=100.0)
+        may_mask = [d.year == 2024 and d.month == 5 for d in prices["date"]]
+        may_indices = [i for i, v in enumerate(may_mask) if v]
+        last_may_idx = may_indices[-1]
+        prices.iloc[last_may_idx, prices.columns.get_loc("close")] = 110.0
+        prices.iloc[last_may_idx, prices.columns.get_loc("high")] = 112.0
+
+        tickers = {"AAPL": prices}
+        client = _mock_client_factory(tickers)
+        db = _db(tmp_path)
+
+        with patch("scanner.data.universe.SAMPLE_UNIVERSE", _sample_universe(["AAPL"])):
+            run_daily(scope="sample", db_path=db, client=client, run_date=_TODAY)
+
+        # ── Step 2: read back the real per-resolution BB outputs ───────────
+        with Storage(db) as s:
+            daily_out = s.read_indicator_outputs("AAPL", "US", _TODAY, resolution="daily")
+            weekly_out = s.read_indicator_outputs("AAPL", "US", _TODAY, resolution="weekly")
+            monthly_out = s.read_indicator_outputs("AAPL", "US", _TODAY, resolution="monthly")
+
+        # Precondition: the orchestrator actually produced all 3 resolutions
+        assert "box_breakout" in daily_out, "daily BB missing"
+        assert "box_breakout" in weekly_out, "weekly BB missing"
+        assert "box_breakout" in monthly_out, "monthly BB missing"
+
+        # ── Step 3: build a directional outputs dict at the seam ───────────
+        # Use TestScoreTickers._outputs("buy") as the base (strong buy combo),
+        # then overlay the real orchestrator-computed BB outputs.
+        base = TestScoreTickers()._outputs("buy")
+
+        # Inject the real orchestrator-produced BB values
+        base["box_breakout"] = daily_out["box_breakout"]["raw_value"]
+        base["box_breakout_weekly"] = weekly_out["box_breakout"]["raw_value"]
+        base["box_breakout_monthly"] = monthly_out["box_breakout"]["raw_value"]
+
+        # ── Step 4: score with MTF keys, then score without ────────────────
+        df_with = score_tickers({("AAPL", "US"): base}, _TODAY)
+        assert df_with.iloc[0]["direction"] == "buy", "combo must be buy for alignment"
+
+        base_without = {k: v for k, v in base.items()
+                        if k not in ("box_breakout_weekly", "box_breakout_monthly")}
+        df_without = score_tickers({("AAPL", "US"): base_without}, _TODAY)
+
+        # rank_score with MTF must strictly exceed rank_score without
+        assert df_with.iloc[0]["rank_score"] > df_without.iloc[0]["rank_score"], (
+            f"MTF bonus was not applied: {df_with.iloc[0]['rank_score']} "
+            f"<= {df_without.iloc[0]['rank_score']}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -577,9 +842,9 @@ class TestStorageIdempotency:
                 "WHERE ticker='AAPL' AND exchange='US' AND date=?",
                 [_TODAY],
             ).fetchone()[0]
-            # Should be exactly the number of indicators (no duplicates)
+            # Should be exactly the number of indicators plus 2 for MTF Box Breakout
             from scanner.indicators import REGISTRY
-            assert outputs_raw == len(REGISTRY)
+            assert outputs_raw == len(REGISTRY) + 2
 
             # Combo results: one row per combination per day
             combo_raw = s._con.execute(
@@ -643,3 +908,129 @@ def _sample_universe(tickers: list[str]) -> list[dict]:
         }
         for t in tickers
     ]
+
+# ---------------------------------------------------------------------------
+# 9. Report Pipeline (D5)
+# ---------------------------------------------------------------------------
+
+class TestReportPipeline:
+    def test_pipeline_success(self, mock_generate_briefing, tmp_path):
+        """Happy path: JSON and Excel are written, briefing is generated, email is sent."""
+        mock_generate_briefing.return_value = "Mocked AI briefing text."
+        
+        tickers = {"AAPL": _make_prices(300)}
+        client = _mock_client_factory(tickers)
+        db = _db(tmp_path)
+        report_dir = tmp_path / "reports"
+        
+        class FakeTransport:
+            called = False
+            def send(self, **kwargs):
+                self.called = True
+                self.kwargs = kwargs
+                from scanner.report.email import SendResult
+                return SendResult(id="fake-123")
+                
+        transport = FakeTransport()
+        
+        with patch("scanner.data.universe.SAMPLE_UNIVERSE", _sample_universe(["AAPL"])):
+            summary = run_daily(
+                scope="sample",
+                db_path=db,
+                client=client,
+                run_date=_TODAY,
+                report_dir=report_dir,
+                send_email=True,
+                recipients=["test@example.com"],
+                from_addr="from@example.com",
+                email_transport=transport,
+            )
+            
+        assert summary["briefing_generated"] is True
+        assert summary["email_sent"] is True
+        
+        # Verify JSON and Excel files exist
+        run_id = f"{_TODAY}_sample"
+        assert (report_dir / f"{run_id}_dashboard.json").exists()
+        assert (report_dir / f"{run_id}_report.xlsx").exists()
+        
+        # Verify transport was called with correct data
+        assert transport.called is True
+        assert "Mocked AI briefing text." in transport.kwargs["html"]
+        assert transport.kwargs["attachments"][0]["filename"] == f"{run_id}_report.xlsx"
+        assert transport.kwargs["to"] == ["test@example.com"]
+
+    def test_briefing_fail_soft(self, mock_generate_briefing, tmp_path):
+        """If generate_briefing returns None, the run continues, records None, and email sends."""
+        mock_generate_briefing.return_value = None
+        
+        tickers = {"AAPL": _make_prices(300)}
+        client = _mock_client_factory(tickers)
+        db = _db(tmp_path)
+        report_dir = tmp_path / "reports"
+        
+        class FakeTransport:
+            def send(self, **kwargs):
+                from scanner.report.email import SendResult
+                return SendResult(id="fake-123")
+                
+        transport = FakeTransport()
+        
+        with patch("scanner.data.universe.SAMPLE_UNIVERSE", _sample_universe(["AAPL"])):
+            summary = run_daily(
+                scope="sample",
+                db_path=db,
+                client=client,
+                run_date=_TODAY,
+                report_dir=report_dir,
+                send_email=True,
+                recipients=["test@example.com"],
+                from_addr="from@example.com",
+                email_transport=transport,
+            )
+            
+        assert summary["briefing_generated"] is False
+        assert summary["email_sent"] is True
+        
+        # Verify DB logged it correctly
+        with Storage(db) as s:
+            run_id = f"{_TODAY}_sample"
+            row = s._con.execute(
+                "SELECT briefing_generated, email_sent FROM tbl_run_log WHERE run_id = ?",
+                [run_id]
+            ).fetchone()
+            assert row[0] is False  # briefing_generated
+            assert row[1] is True   # email_sent
+
+    def test_email_send_error_caught(self, mock_generate_briefing, tmp_path):
+        """If send_report raises SendError, run_daily catches it and marks email_sent=False."""
+        mock_generate_briefing.return_value = "Briefing."
+        
+        tickers = {"AAPL": _make_prices(300)}
+        client = _mock_client_factory(tickers)
+        db = _db(tmp_path)
+        report_dir = tmp_path / "reports"
+        
+        class FakeFailingTransport:
+            def send(self, **kwargs):
+                from scanner.report.email import SendError
+                raise SendError("Simulated Resend API failure.")
+                
+        transport = FakeFailingTransport()
+        
+        with patch("scanner.data.universe.SAMPLE_UNIVERSE", _sample_universe(["AAPL"])):
+            summary = run_daily(
+                scope="sample",
+                db_path=db,
+                client=client,
+                run_date=_TODAY,
+                report_dir=report_dir,
+                send_email=True,
+                recipients=["test@example.com"],
+                from_addr="from@example.com",
+                email_transport=transport,
+            )
+            
+        assert summary["briefing_generated"] is True
+        assert summary["email_sent"] is False
+        assert summary["status"] == "completed"  # email failure shouldn't crash or alter fetch status

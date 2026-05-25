@@ -181,7 +181,6 @@ Deferred from Phase C:
 - Bulk EOD fetch (`use_bulk_eod=True`) — deferred. Per-ticker is sufficient for sample
   scope and currently handles 100k/day budget easily.
 - Multi-timezone exchange-close handling — v1 sample scope is US-only, no timezone issue.
-- MTF resampling and per-resolution storage — Phase C addendum (see below).
 
 ---
 
@@ -314,21 +313,7 @@ signal-scanner/
   divergence Stochastic, and Box Breakout hand-written.
 - **Data:** EODHD (~$20–50/mo, ~70 exchanges, bulk EOD). yfinance for prototyping.
 - **Storage:** DuckDB over Parquet.
-- **Runtime:** GitHub Actions scheduled workflow (free tier covers it).
-- **Delivery:** Resend email + Excel attachment + static HTML dashboard.
-- **LLM:** Haiku for the briefing layer.
-- **Ops:** Healthchecks.io + Sentry.
-
-## Validation strategy
-
-- Indicators with a 2012 fixture → must reproduce `expected_indicators.csv` within
-  tolerance (continuous: abs_tol 1e-3; flags & counters: exact).
-- Box Breakout → synthetic fixtures in `tests/fixtures/synthetic/` (no 2012 ground
-  truth) + informal eyeball on the real TSC fixtures.
-- MAV Diff Z-Score → synthetic validation (no fixture column).
-- Pipeline → `--universe sample` (10 tickers) for dev before scaling.
-
-## Multi-timeframe range-breakout upgrade
+- **Runtime:*### Multi-timeframe range-breakout upgrade
 
 Derived from `reference/range_breakout_scanner_brief.docx`. **Not blocking v1.**
 The v1 daily-only pipeline ships first; MTF is layered in as addenda to Phases B, C,
@@ -344,9 +329,9 @@ alignment — promoting stocks where the same indicator fires on multiple resolu
 simultaneously. Do not put resampling logic or multi-timeframe awareness inside
 any indicator.
 
-Full spec: `spec/multi-timeframe.md`.
+Full spec: `spec/box-breakout-mt.md`.
 
-### Phase B addendum — Box Breakout enhanced spec
+### Phase B addendum — Box Breakout enhanced spec (Stage 1 & 2)
 
 The Box Breakout section of `spec/indicators.md` has been rewritten to incorporate
 the brief's richer single-timeframe logic. These changes are not blocking the current
@@ -359,36 +344,34 @@ v1 implementation but define the target state for the enhanced build:
 - Enhanced breakout trigger: price condition + optional ATR expansion + optional volume
   expansion + optional trend filter.
 - `confirmed_close` mode for weekly/monthly bars.
-- Five open questions requiring user resolution before implementation (see below).
 
 **Implementation order:** the current v1 tests remain valid. Additional synthetic
 fixtures (`pct_duration_threshold.csv`, `vol_expansion_trigger.csv`,
 `trend_filter_gated.csv`) are required for the enhanced-spec build.
 
-### Phase C addendum — resampling and per-resolution storage
+### Phase C addendum — resampling and per-resolution storage (Stage 2 & 4) ✅
 
-- **Resampling:** add a `resample_ohlcv(df, resolution)` utility in `data/` that
-  produces weekly/monthly/quarterly bar series from daily OHLCV using
-  `pandas.resample()`. See `spec/multi-timeframe.md §Resampling`.
+- **Resampling:** `resample_ohlcv(df, freq)` in `cli.py` produces weekly/monthly bar
+  series from daily OHLCV using `pandas.resample()`. Drops trailing incomplete period
+  (confirmed-close convention).
 - **Per-resolution orchestration:** after computing indicators on daily bars, also
-  resample and compute for the `medium_term` (weekly) and `long_term` (monthly) scan
-  modes. Store per `(ticker, exchange, date, indicator_name, resolution)`.
-- **Storage schema change:** add `resolution VARCHAR DEFAULT 'daily'` to
+  resample and compute Box Breakout for weekly (W-FRI) and monthly (ME) scan modes.
+  Results stored per `(ticker, exchange, date, indicator_name, resolution)` and passed
+  to scoring as `box_breakout_weekly` / `box_breakout_monthly` namespaced keys.
+- **Storage schema:** `resolution VARCHAR DEFAULT 'daily'` added to
   `tbl_indicator_outputs`. V1 rows are unaffected.
-- **Long-history data source decision:** `long_term` (monthly, 240 bars, ~22 years)
-  likely requires Stooq or Norgate in addition to EODHD. Decision required before
-  Phase C addendum build. See `spec/multi-timeframe.md §Data source implications`.
 
-### Phase D addendum — multi-timeframe alignment scoring
+### Phase D addendum — multi-timeframe alignment scoring (Stage 4) ✅
 
-- Add `mtf_alignment_score` computation to `scoring.py`: for each ticker, query
-  `tbl_indicator_outputs` across resolutions and count directional agreements.
-- Add `w_mtf * mtf_alignment_score` term to the `rank_score` formula.
-- Report and dashboard changes: surface multi-resolution alignment as a column or
-  badge in the output (e.g. "D+W+M" for daily + weekly + monthly alignment).
-- Open question #7 (alignment scoring shape) must be resolved before this build.
+- MTF alignment term in `scoring.py`: weekly+monthly BB only (daily excluded — already
+  in combo). `_W_MTF = 0.10` (provisional, Phase E calibrates). ≥2 gate means both
+  weekly and monthly must be present for any bonus; dormant for stocks lacking ~20y
+  history.
+- Rule A: align to combo direction (not daily BB).
+- Rule B: daily excluded from numerator/denominator; both weekly+monthly required.
+- All 9 OPEN[#n] flags in `spec/box-breakout-mt.md` resolved.
 
-### Phase E backfill implications
+### Phase E backfill implications (Stage 3)
 
 - Run the backtest separately for each scan mode (`short_term`, `medium_term`,
   `long_term`) and measure forward returns at timeframe-appropriate horizons (e.g.
@@ -399,29 +382,31 @@ fixtures (`pct_duration_threshold.csv`, `vol_expansion_trigger.csv`,
 - Tune Box Breakout enhanced-spec parameters: `min_congestion_pct`, `atr_expansion_factor`,
   `vol_expansion_factor`, `trend_filter_window` per scan mode.
 
-### Open questions requiring user resolution (before Phase B/C/D addendum builds)
+### Open questions — all resolved ✅
 
-| # | Question | Spec location |
+| # | Resolution | Spec location |
 |---|----------|--------------|
-| 1 | Resistance zone vs. breakout level (max-high, max-high + buffer, or Signal A touch ≠ breakout) | `spec/indicators.md §8` |
-| 2 | AND vs OR for the two parallel detection signals | `spec/indicators.md §8` |
-| 3 | Per-bar definition of "true congestion" for minimum-duration counting | `spec/indicators.md §8` |
-| 4 | ATR expansion threshold (multiple, baseline window, hard gate vs demotion) | `spec/indicators.md §8` |
-| 5 | Confirmed-close vs in-progress mode default | `spec/indicators.md §8` |
-| 6 | Bar-count table inconsistency (3–10 yr weekly = 520 bars > 300-bar guideline) | `spec/multi-timeframe.md` |
-| 7 | MTF alignment scoring shape (additive, multiplicative, hard-tier, bonus-at-2) | `spec/multi-timeframe.md` |
-| 8 | Volume in breakout trigger (Option A: keep separate; B: integrate; C: soft gate) | `spec/indicators.md §8` |
+| OPEN[#1] | Volume not gated; stays confirmation #11 | `spec/box-breakout-mt.md` |
+| OPEN[#2] | AND (proximity + compression required) | `spec/box-breakout-mt.md` |
+| OPEN[#3] | Fixed-lookback %-duration | `spec/box-breakout-mt.md` |
+| OPEN[#4] | Symmetric (bull + bear) | `spec/box-breakout-mt.md` |
+| OPEN[#5] | Orchestrator owns per-resolution params | `spec/box-breakout-mt.md` |
+| OPEN[#6] | Confirmed-close; drop trailing incomplete bar | `spec/box-breakout-mt.md` |
+| OPEN[#7] | Align to combo direction; weekly+monthly only | `spec/box-breakout-mt.md` |
+| OPEN[#8] | Daily BB replaces old in combo; W/M feed alignment only | `spec/box-breakout-mt.md` |
+| OPEN[#9] | History capped at EODHD; 20y/monthly is long mode | `spec/box-breakout-mt.md` |
 
 ---
 
 ## Open items
 
 - Box Breakout default parameters — set in Phase E, not by eye.
-- Box Breakout enhanced-spec open questions #1–8 — see table above; resolve before Phase B addendum.
+- `_W_MTF = 0.10` — provisional; Phase E calibrates on the long-history subset.
 - v2 OI substitute — put/call ratio vs. short interest, decide later.
 - Exact daily run time — back-solve from "6 AM ET delivery" once exchange close
   timings are mapped in Phase C.
-- Long-history data source for `long_term` scan mode — Stooq vs Norgate; resolve before Phase C addendum.
+- Long-history data source for `long_term` scan mode — Stooq vs Norgate; resolved as
+  EODHD-only for v1 (30+ yr history available on €19.99 tier).
 
 ---
 
@@ -432,9 +417,10 @@ fixtures (`pct_duration_threshold.csv`, `vol_expansion_trigger.csv`,
 | A — Scaffold | ✅ complete | 0 (plumbing) |
 | B — Indicators + scoring | ✅ complete | 319 passed |
 | C — Data pipeline | ✅ complete (sample scope) | 160 |
-| D — Deploy + v1 agent | ⬜ next | — |
+| C addendum — Box Breakout MTF | ✅ complete (Stage 4) | 55 (in test_cli.py) |
+| D — Deploy + v1 agent | ✅ complete (pending dry-run) | 71 (24 JSON + 16 Excel + 14 briefing + 14 email + 3 pipeline) |
 | E — Backtest | ⬜ not started | — |
 | v2 — Agentic context | ⬜ not started | — |
 | v2.5 — Reflective loop | ⬜ not scoped | — |
 
-**Total: 319 tests pass, 5 xfailed (MAV Breakout fixture — data limitation, documented).**
+**Total: 432 tests pass, 0 skipped, 5 xfailed (MAV Breakout fixture — data limitation, documented).**
