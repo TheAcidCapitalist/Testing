@@ -205,6 +205,18 @@ def candidates(
             "Country": "region"
         })
 
+        # EODHD's price API uses TICKER.US for all US-listed stocks regardless
+        # of whether the symbol list reports the exchange as NYSE, NASDAQ, AMEX,
+        # ARCA, BATS, etc.  Normalise all US-exchange variants to "US" so that
+        # the downstream fetch calls build the correct TICKER.US endpoint.
+        _US_EXCHANGE_VARIANTS = {
+            "NYSE", "NASDAQ", "AMEX", "ARCA", "BATS", "CBOE",
+            "NYSE MKT", "NYSE ARCA", "OTC",
+        }
+        all_symbols["exchange"] = all_symbols["exchange"].apply(
+            lambda ex: "US" if str(ex).upper() in _US_EXCHANGE_VARIANTS else ex
+        )
+
         # Load cache
         cached = storage.read_universe()
         
