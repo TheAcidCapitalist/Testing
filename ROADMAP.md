@@ -197,11 +197,18 @@ Deliverables:
       pipeline, a Haiku pass over the top-N ranked output produces a one-line "why" per
       ticker plus a 3-paragraph "what looks interesting today" lede. Reads the pipeline's
       JSON output only, never raw data. Fail-soft.
-- [ ] `dashboard/artifact.html` — zero-dependency static HTML that reads
-      `data/latest.json`. Dark mode, filterable by region/sector.
-- [ ] `.github/workflows/daily-scan.yml` — cron at 04:00 ET, full global run.
-- [ ] `.github/workflows/ci.yml` — PR tests + lint.
-- [ ] Healthchecks.io ping + Sentry on errors.
+- [x] `dashboard/index.html` — zero-dependency static HTML that reads `dashboard/latest.json`.
+      Light/dark mode, Apple-aesthetic design. Renders envelope KPIs, briefing, ranked table.
+- [x] `dashboard/latest.json` — sample payload for local testing.
+- [x] `.github/workflows/daily-scan.yml` — cron at 08:00 UTC, `workflow_dispatch` for dry runs.
+      DB persisted via `actions/cache` (rolling key). Healthchecks.io start/success/fail pings.
+      Pages deploy via `actions/deploy-pages`. `email_sent` output gates success vs fail ping.
+- [x] Healthchecks.io ping wired — start + success/fail split by `email_sent` flag.
+- [x] OpenAI `gpt-4o-mini` briefing layer (was Anthropic Haiku; swapped 2026-05-25).
+- [x] Exchange normalisation fix: EODHD symbol list returns `NYSE`/`NASDAQ` but price API
+      requires `.US` suffix. All US exchange variants now normalised to `"US"` (2026-05-26).
+
+**Sentry deferred** — Healthchecks fail-ping is the v1 alerting mechanism.
 
 ---
 
@@ -254,25 +261,27 @@ math is working in which regime.
 ```
 signal-scanner/
 ├── CLAUDE.md
-├── README.md
+├── HANDOVER.md
 ├── ROADMAP.md                    ← this file
-├── pyproject.toml                ← uv
-├── .env.example
+├── pyproject.toml                ← uv; openai, openpyxl, httpx declared
+├── .env.example                  ← EODHD_API_KEY, OPENAI_API_KEY, RESEND_API_KEY, ...
 ├── .github/workflows/
-│   ├── daily-scan.yml
-│   └── ci.yml
-├── reference/
-│   └── tsc-macro-dashboard-2012-05-31.xlsm
+│   └── daily-scan.yml            ← cron 08:00 UTC + workflow_dispatch; Pages + Healthchecks
 ├── spec/
-│   ├── indicators.md             ← all 11 + box breakout
+│   ├── indicators.md
 │   ├── scoring.md
-│   └── universe.md
+│   ├── universe.md
+│   ├── dashboard-json.md         ← canonical output contract (D1)
+│   ├── box-breakout-mt.md        ← MTF upgrade spec
+│   └── resend-probe-notes.md
+├── scripts/
+│   └── resend_probe.py
 ├── src/scanner/
 │   ├── indicators/               ← one file per indicator, auto-registered
-│   │   ├── __init__.py           ← registry
-│   │   ├── _bollinger_core.py    ← shared z-score + days_in_band (private)
-│   │   ├── _daily_trend_core.py  ← shared ma_slope_series (private)
-│   │   ├── _percentile.py        ← shared Excel PERCENTRANK helper (private)
+│   │   ├── __init__.py
+│   │   ├── _bollinger_core.py
+│   │   ├── _daily_trend_core.py
+│   │   ├── _percentile.py
 │   │   ├── rsi.py
 │   │   ├── bollinger_normal.py
 │   │   ├── bollinger_contrarian.py
@@ -280,30 +289,32 @@ signal-scanner/
 │   │   ├── daily_trend_contrarian.py
 │   │   ├── volatility.py
 │   │   ├── volume.py
-│   │   ├── mav_breakout.py       ← gnarly
-│   │   ├── stochastic.py         ← gnarly
-│   │   ├── box_breakout.py       ← gnarly, no fixture
-│   │   └── mav_diff_z.py         ← confirmation, no fixture
+│   │   ├── mav_breakout.py
+│   │   ├── stochastic.py
+│   │   ├── box_breakout.py
+│   │   └── mav_diff_z.py
 │   ├── data/
-│   │   ├── eodhd.py
-│   │   ├── universe.py
-│   │   └── storage.py
-│   ├── scoring.py
+│   │   ├── eodhd.py              ← EODHD client
+│   │   ├── universe.py           ← Stage 1 candidates + Stage 2 post-ingest filters
+│   │   ├── yfinance_meta.py      ← market-cap / sector metadata
+│   │   └── storage.py            ← DuckDB wrapper
+│   ├── scoring.py                ← combo + rank_score + MTF alignment columns
 │   ├── report/
-│   │   ├── excel.py
-│   │   ├── email.py
-│   │   └── dashboard_json.py
-│   ├── agent/                    ← LLM lives here, only here
-│   │   └── briefing.py           ← v1; context.py + tools/ come in v2
-│   └── cli.py
+│   │   ├── dashboard_json.py     ← D1 canonical output builder
+│   │   ├── excel.py              ← D2 ranked xlsx
+│   │   └── email.py              ← D4 Resend sender
+│   ├── agent/
+│   │   └── briefing.py           ← D3 OpenAI gpt-4o-mini; fail-soft
+│   └── cli.py                    ← run_daily + run_report_pipeline + argparse
 ├── tests/
 │   ├── fixtures/
-│   │   ├── tsc_2012/             ← extracted ground-truth
-│   │   └── synthetic/            ← hand-built cross scenarios
-│   └── test_*.py
+│   │   ├── tsc_2012/
+│   │   └── synthetic/
+│   └── test_*.py                 ← 432 tests, 0 skipped
 ├── dashboard/
-│   └── artifact.html
-└── data/                         ← gitignored, local DuckDB
+│   ├── index.html                ← static Pages dashboard; fetches ./latest.json
+│   └── latest.json               ← sample payload + replaced by workflow on each run
+└── data/                         ← gitignored; DuckDB lives here locally
 ```
 
 ## Tech stack
@@ -400,13 +411,38 @@ fixtures (`pct_duration_threshold.csv`, `vol_expansion_trigger.csv`,
 
 ## Open items
 
-- Box Breakout default parameters — set in Phase E, not by eye.
-- `_W_MTF = 0.10` — provisional; Phase E calibrates on the long-history subset.
-- v2 OI substitute — put/call ratio vs. short interest, decide later.
-- Exact daily run time — back-solve from "6 AM ET delivery" once exchange close
-  timings are mapped in Phase C.
-- Long-history data source for `long_term` scan mode — Stooq vs Norgate; resolved as
-  EODHD-only for v1 (30+ yr history available on €19.99 tier).
+| # | Item | Priority |
+|---|------|----------|
+| OI-1 | Box Breakout default parameters — calibrate in Phase E, not by eye | Phase E |
+| OI-2 | `_W_MTF = 0.10` — provisional; Phase E calibrates on long-history subset | Phase E |
+| OI-3 | US metadata cache (yfinance) fills incrementally — first few `us` runs will have thin scored sets; normal | Ongoing |
+| OI-4 | `actions/cache` for DuckDB is best-effort (evictable after 7 days). Upgrade to S3/R2 if history loss becomes a problem | Post Phase E |
+| OI-5 | No CI workflow yet (`.github/workflows/ci.yml`) — PRs aren't lint/test gated | Nice to have |
+| OI-6 | v2 OI substitute — put/call ratio vs. short interest | v2 |
+
+---
+
+## What's next (immediate priority order)
+
+### 1. Confirm the dry run ✅ / 🔄
+- Trigger `workflow_dispatch` on GitHub Actions.
+- Confirm: workflow green, email delivered, `latest.json` published, Pages dashboard renders, Healthchecks pings recorded.
+- **Exchange normalisation fix shipped 2026-05-26** — this was the root cause of 0 tickers scoring. Re-run should now score live tickers.
+
+### 2. Let the cache warm up (Days 1–7)
+- The yfinance metadata cache (`tbl_universe`) fills incrementally — 500 tickers/run.
+- After 3–5 runs the metadata coverage will be broad enough to score a representative US universe.
+- Small result sets on early runs are expected and correct.
+
+### 3. Phase E — Backtest & Calibration
+- Build `src/scanner/backtest.py`: feed `compute_series` historical bars, simulate entry/exit, measure 1/5/20-day forward returns per signal.
+- Calibrate all provisional defaults (RSI thresholds, Bollinger SD, Box Breakout params, scoring weights `_W_AGREE`, `_W_MTF`, etc.).
+- Document results in `spec/backtest-results.md`.
+- **Gate:** provisional defaults replaced with data-driven values.
+
+### 4. v2 — Agentic context layer *(post-backtest)*
+- Tool-using agent for the top-N ranked names: news, filings (EDGAR), sector co-movement.
+- Build second, when ≥30 days of deterministic outputs exist to compare against.
 
 ---
 
@@ -418,9 +454,12 @@ fixtures (`pct_duration_threshold.csv`, `vol_expansion_trigger.csv`,
 | B — Indicators + scoring | ✅ complete | 319 passed |
 | C — Data pipeline | ✅ complete (sample scope) | 160 |
 | C addendum — Box Breakout MTF | ✅ complete (Stage 4) | 55 (in test_cli.py) |
-| D — Deploy + v1 agent | ✅ complete (pending dry-run) | 71 (24 JSON + 16 Excel + 14 briefing + 14 email + 3 pipeline) |
-| E — Backtest | ⬜ not started | — |
+| D — Deploy + v1 agent | ✅ complete | 71 (24 JSON + 16 Excel + 14 briefing + 14 email + 3 pipeline) |
+| D hotfix — Exchange normalisation | ✅ shipped 2026-05-26 | (covered by test_universe.py) |
+| E — Backtest & calibration | ⬜ not started | — |
 | v2 — Agentic context | ⬜ not started | — |
 | v2.5 — Reflective loop | ⬜ not scoped | — |
 
 **Total: 432 tests pass, 0 skipped, 5 xfailed (MAV Breakout fixture — data limitation, documented).**
+
+Last updated: 2026-05-27.
